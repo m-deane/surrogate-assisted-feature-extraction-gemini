@@ -1,0 +1,77 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="mean_med_diesel_crack_input1_trade_month_lag2<-43.9900017" ]
+    0 -> 1 [label="yes" color="#FF0000"]
+    0 -> 2 [label="no, missing" color="#0000FF"]
+
+    1 [ label="new_sweet_sr_margin<-4.9000001" ]
+    1 -> 3 [label="yes" color="#FF0000"]
+    1 -> 4 [label="no, missing" color="#0000FF"]
+
+    3 [ label="leaf=-3.3232739" ]
+
+    4 [ label="mean_sing_gasoline_vs_vlsfo_trade_month<4.78000021" ]
+    4 -> 7 [label="yes" color="#FF0000"]
+    4 -> 8 [label="no, missing" color="#0000FF"]
+
+    7 [ label="mean_nwe_hsfo_crack_trade_month_lag1<-11.4300003" ]
+    7 -> 11 [label="yes" color="#FF0000"]
+    7 -> 12 [label="no, missing" color="#0000FF"]
+
+    11 [ label="mean_med_diesel_crack_input1_trade_month_lag2<-84.1299973" ]
+    11 -> 17 [label="yes" color="#FF0000"]
+    11 -> 18 [label="no, missing" color="#0000FF"]
+
+    17 [ label="leaf=0.435504913" ]
+
+    18 [ label="leaf=-1.0882591" ]
+
+    12 [ label="mean_nwe_ulsfo_crack_trade_month lag3<11.8900003" ]
+    12 -> 19 [label="yes" color="#FF0000"]
+    12 -> 20 [label="no, missing" color="#0000FF"]
+
+    19 [ label="leaf=-0.069759056" ]
+
+    20 [ label="leaf=2.36974812" ]
+
+    8 [ label="leaf=5.08172607" ]
+
+    2 [ label="new_sweet_sr_margin<-2.49000001" ]
+    2 -> 5 [label="yes" color="#FF0000"]
+    2 -> 6 [label="no, missing" color="#0000FF"]
+
+    5 [ label="leaf=-4.59592867" ]
+
+    6 [ label="mean_sing_gasoline_vs_vlsfo_trade_month<-7.6500001" ]
+    6 -> 9 [label="yes" color="#FF0000"]
+    6 -> 10 [label="no, missing" color="#0000FF"]
+
+    9 [ label="new_sweet_sr_margin<-0.25999999" ]
+    9 -> 13 [label="yes" color="#FF0000"]
+    9 -> 14 [label="no, missing" color="#0000FF"]
+
+    13 [ label="leaf=0.152044684" ]
+
+    14 [ label="leaf=1.18331683" ]
+
+    10 [ label="mean_med_diesel_crack_input1_trade_month_lag2<48.5600014" ]
+    10 -> 15 [label="yes" color="#FF0000"]
+    10 -> 16 [label="no, missing" color="#0000FF"]
+
+    15 [ label="mean_med_diesel_crack_input1_trade_month_lag2<-41.5499992" ]
+    15 -> 21 [label="yes" color="#FF0000"]
+    15 -> 22 [label="no, missing" color="#0000FF"]
+
+    21 [ label="leaf=-0.0964553878" ]
+
+    22 [ label="leaf=-2.81893325" ]
+
+    16 [ label="mean_med_diesel_crack_input1_trade_month_lag2<90.9199982" ]
+    16 -> 23 [label="yes" color="#FF0000"]
+    16 -> 24 [label="no, missing" color="#0000FF"]
+
+    23 [ label="leaf=-0.217955396" ]
+
+    24 [ label="leaf=0.0170444492" ]
+}

@@ -1,0 +1,77 @@
+--- Summary of Key Findings ---
+
+--- Feature Importance Rankings (Full Lists) ---
+
+Importance Scores:
+                                               Permutation_Train  SHAP_Train       MDI
+feature                                                                               
+mean_med_diesel_crack_input1_trade_month_lag2       1.612195e-01    4.717315  0.175699
+mean_nwe_hsfo_crack_trade_month_lag1                8.011668e-02    2.800697  0.184487
+mean_nwe_lsfo_crack_trade_month                     3.142676e-02    1.233738  0.079313
+mean_nwe_ulsfo_crack_trade_month lag3               2.668315e-02    0.995623  0.069744
+mean_sing_gasoline_vs_vlsfo_trade_month             6.984408e-02    2.468521  0.141894
+mean_sing_vlsfo_crack_trade_month_lag3              5.788018e-02    1.832649  0.111498
+new_sweet_sr_margin                                 1.645106e-01    6.149374  0.237365
+totaltar                                            1.110223e-17    0.000000  0.000000
+
+Importance Ranks (Lower is better):
+                                               mean_rank  Permutation_Train_rank  SHAP_Train_rank  MDI_rank
+feature                                                                                                    
+new_sweet_sr_margin                             1.000000                     1.0              1.0       1.0
+mean_med_diesel_crack_input1_trade_month_lag2   2.333333                     2.0              2.0       3.0
+mean_nwe_hsfo_crack_trade_month_lag1            2.666667                     3.0              3.0       2.0
+mean_sing_gasoline_vs_vlsfo_trade_month         4.000000                     4.0              4.0       4.0
+mean_sing_vlsfo_crack_trade_month_lag3          5.000000                     5.0              5.0       5.0
+mean_nwe_lsfo_crack_trade_month                 6.000000                     6.0              6.0       6.0
+mean_nwe_ulsfo_crack_trade_month lag3           7.000000                     7.0              7.0       7.0
+totaltar                                        8.000000                     8.0              8.0       8.0
+
+--- Top 20 Rule Conditions by Importance (Permutation) ---
+                                        Original_Condition   Importance
+(mean_med_diesel_crack_input1_trade_month_lag2, > -48.535) 3.006554e-02
+                           (new_sweet_sr_margin, <=-0.655) 1.943308e-02
+        (mean_sing_gasoline_vs_vlsfo_trade_month, <=0.885) 1.510314e-02
+(mean_med_diesel_crack_input1_trade_month_lag2, <=-48.535) 1.488514e-02
+         (mean_nwe_hsfo_crack_trade_month_lag1, > -11.005) 1.469480e-02
+                           (new_sweet_sr_margin, > -2.510) 1.278005e-02
+        (mean_sing_gasoline_vs_vlsfo_trade_month, > 0.885) 1.069582e-02
+                           (new_sweet_sr_margin, <=-2.510) 9.479532e-03
+                           (new_sweet_sr_margin, <=-2.315) 7.652518e-03
+                           (new_sweet_sr_margin, > -0.830) 7.471062e-03
+          (mean_nwe_hsfo_crack_trade_month_lag1, <=-5.945) 6.017506e-03
+          (mean_nwe_hsfo_crack_trade_month_lag1, > -8.675) 5.356528e-03
+         (mean_nwe_hsfo_crack_trade_month_lag1, <=-11.005) 4.666232e-03
+                           (new_sweet_sr_margin, <=-0.830) 3.622727e-03
+                           (new_sweet_sr_margin, > -0.655) 3.379744e-03
+          (mean_nwe_hsfo_crack_trade_month_lag1, > -5.945) 1.662926e-03
+                           (new_sweet_sr_margin, > -2.315) 1.110223e-16
+(mean_med_diesel_crack_input1_trade_month_lag2, > -79.880) 8.881784e-17
+(mean_med_diesel_crack_input1_trade_month_lag2, <=-79.880) 8.881784e-17
+          (mean_nwe_hsfo_crack_trade_month_lag1, <=-8.675) 8.881784e-17
+
+--- Top Feature Interactions (Approx. H-statistic) ---
+mean_nwe_ulsfo_crack_trade_month lag3    mean_nwe_hsfo_crack_trade_month_lag1      1.000000
+mean_nwe_lsfo_crack_trade_month          totaltar                                  0.999300
+mean_sing_gasoline_vs_vlsfo_trade_month  mean_nwe_ulsfo_crack_trade_month lag3     0.995846
+mean_nwe_ulsfo_crack_trade_month lag3    totaltar                                  0.995189
+                                         mean_nwe_lsfo_crack_trade_month           0.994848
+new_sweet_sr_margin                      mean_sing_vlsfo_crack_trade_month_lag3    0.994245
+                                         totaltar                                  0.987162
+mean_sing_gasoline_vs_vlsfo_trade_month  new_sweet_sr_margin                       0.986395
+mean_nwe_lsfo_crack_trade_month          new_sweet_sr_margin                       0.985988
+mean_nwe_ulsfo_crack_trade_month lag3    new_sweet_sr_margin                       0.984372
+
+--- Interaction Stability (Mean +/- Std Dev H-statistic across Bootstraps) ---
+  ('mean_nwe_ulsfo_crack_trade_month lag3', 'mean_nwe_hsfo_crack_trade_month_lag1'): 0.997 +/- 0.004
+  ('mean_nwe_lsfo_crack_trade_month', 'totaltar'): 1.000 +/- 0.001
+  ('mean_sing_gasoline_vs_vlsfo_trade_month', 'mean_nwe_ulsfo_crack_trade_month lag3'): 0.999 +/- 0.003
+
+--- Approx. 3-Way Interaction (Std Dev of 3D PDP) ---
+  Triplet ['new_sweet_sr_margin', 'mean_nwe_hsfo_crack_trade_month_lag1', 'mean_med_diesel_crack_input1_trade_month_lag2']: 10.0268
+
+
+
+--- Linear Model Comparison ---
+Engineered Features Added: ['mean_med_diesel_crack_input1_trade_month_lag2_gt_neg48p53', 'new_sweet_sr_margin_le_neg0p66', 'mean_sing_gasoline_vs_vlsfo_trade_month_le_0p89', 'mean_med_diesel_crack_input1_trade_month_lag2_le_neg48p53', 'mean_nwe_ulsfo_crack_trade_month lag3_x_mean_nwe_hsfo_crack_trade_month_lag1', 'mean_nwe_lsfo_crack_trade_month_x_totaltar']
+Linear Model (Original): Test RMSE=43.9003, R2=-3.4444
+Linear Model (Enginrd.): Test RMSE=34.9383, R2=-1.8150
