@@ -8,21 +8,558 @@ from plotly.subplots import make_subplots
 import xgboost as xgb
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, RidgeCV, LassoCV
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.tree import plot_tree, export_text
 from sklearn.inspection import permutation_importance, partial_dependence, PartialDependenceDisplay
 # Import internal function to potentially bypass check_is_fitted issue
 from sklearn.inspection import _partial_dependence
 from sklearn.utils import resample # For bootstrapping
+from mpl_toolkits.mplot3d import Axes3D # Import for 3D plots
 import shap
 from lofo import LOFOImportance, Dataset, plot_importance
 from itertools import combinations
 from collections import Counter
 import warnings
 import os
+import json # For saving results
+from datetime import datetime # For report timestamp
+# Import for Granger Causality
+from statsmodels.tsa.stattools import grangercausalitytests, adfuller
+import statsmodels.api as sm # Optional for stationarity checks
+# Import for RuleFit
+from imodels import RuleFitRegressor
 
 warnings.filterwarnings('ignore')
+
+# --- Report Generator Class (Copied from reference) ---
+# NOTE: Minor adaptations might be needed based on actual script variables
+class ReportGenerator:
+    def __init__(self):
+        """Initialize the report generator."""
+        self.report_sections = []
+        self.results_dict = {} # Store results for JSON saving
+
+    def add_section(self, title: str, content: str):
+        """
+        Add a section to the report.
+        """
+        self.report_sections.append({
+            'title': title,
+            'content': content
+        })
+
+    def add_dataset_overview(self, df_shape, features_list, date_range):
+        """Adds dataset overview section."""
+        content = f"""- **Dataset Size**: {df_shape[0]} samples, {df_shape[1]} columns (including target/date)
+- **Features Analyzed**: {len(features_list)} numeric features
+- **Date Range**: {date_range[0]} to {date_range[1]}
+"""
+        self.add_section("1. Dataset Overview", content)
+        self.results_dict['dataset_overview'] = {
+            'shape': df_shape,
+            'num_features': len(features_list),
+            'date_start': str(date_range[0]),
+            'date_end': str(date_range[1])
+        }
+
+    def add_surrogate_model_performance(self, model_type, train_rmse, train_r2, test_rmse, test_r2):
+        """Adds performance metrics for the single surrogate model."""
+        content = f"""### Surrogate Model ({model_type}) Performance
+- **Training RMSE**: {train_rmse:.4f}
+- **Training R²**: {train_r2:.4f}
+- **Test RMSE**: {test_rmse:.4f}
+- **Test R²**: {test_r2:.4f}
+
+*Interpretation Guidance:*
+* *R²*: Proportion of variance explained (closer to 1 is better). Negative R² indicates the model performs worse than a horizontal line.
+* *RMSE*: Root Mean Squared Error (lower is better), in the units of the target variable.
+* *Train vs. Test Gap*: A large difference often indicates overfitting.
+"""
+        self.add_section("5. Model Performance", content) # Use section number from example md
+        self.results_dict['surrogate_performance'] = {
+            'model_type': model_type,
+            'train_rmse': train_rmse,
+            'train_r2': train_r2,
+            'test_rmse': test_rmse,
+            'test_r2': test_r2
+        }
+
+    def add_feature_importance_summary(self, shap_df, combined_imp_df):
+        """Adds summary of top features based on SHAP and combined rank."""
+        content = "### Top Features by SHAP Analysis (Train Set):\n"
+        if shap_df is not None and not shap_df.empty:
+            for i, row in shap_df.head(5).iterrows():
+                content += f"- `{row['feature']}` (Mean Abs SHAP: {row['shap_importance']:.3f})\n"
+            self.results_dict['top_features_shap'] = shap_df.head(5).to_dict('records')
+        else:
+            content += "- (SHAP analysis not available)\n"
+
+        content += "\n### Top Features by Combined Importance Rank (Train Set):\n"
+        if combined_imp_df is not None and not combined_imp_df.empty and 'mean_rank' in combined_imp_df.columns:
+            for i, (idx, row) in enumerate(combined_imp_df.head(5).iterrows()):
+                content += f"- `{idx}` (Mean Rank: {row['mean_rank']:.2f})\n"
+            self.results_dict['top_features_combined'] = combined_imp_df.head(5).to_dict('index')
+        else:
+            content += "- (Combined ranking not available)\n"
+
+        self.add_section("2. Key Features and Their Importance", content)
+
+    def add_feature_interactions_summary(self, h_values, interaction_stability, h_3way_stats=None):
+        """Adds feature interaction summary."""
+        content = "### Significant Pairwise Interactions (Approx. H-statistic):\n"
+        if h_values is not None and not h_values.empty:
+            # Display top N interactions
+            top_h_interactions_dict = {}
+            count = 0
+            for (f1, f2), h_stat in h_values.head(10).items():
+                content += f"- `{f1}` × `{f2}` (H ≈ {h_stat:.3f})"
+                top_h_interactions_dict[f'{f1}_x_{f2}'] = h_stat # Store for JSON
+                # Add stability info if available
+                pair_key = tuple(sorted((f1, f2)))
+                if pair_key in interaction_stability:
+                    stab = interaction_stability[pair_key]
+                    content += f" (Stable: Mean={stab['mean']:.3f} ± {stab['std']:.3f})\n"
+                else:
+                    content += "\n"
+                count += 1
+                if count >= 5: # Limit report summary to top 5
+                    break
+            self.results_dict['pairwise_interactions_h_top5'] = top_h_interactions_dict
+            self.results_dict['interaction_stability'] = interaction_stability
+        else:
+            content += "- (No significant pairwise interactions found or calculated)\n"
+
+        content += "\n### Three-way Interactions (Approx. H-statistic for Top Feature Triplets):\n"
+        if h_3way_stats is not None and not h_3way_stats.empty:
+            # Sort by H-statistic descending
+            h_3way_stats_sorted = h_3way_stats.sort_values('H_statistic', ascending=False)
+            for idx, row in h_3way_stats_sorted.iterrows():
+                triplet_str = ' × '.join(row['Triplet'])
+                content += f"- `{triplet_str}` (H ≈ {row['H_statistic']:.4f})\n"
+            self.results_dict['threeway_interactions_h'] = h_3way_stats_sorted.to_dict('records')
+        else:
+            content += "- (Not calculated or available for the selected triplets)\n"
+
+        self.add_section("3. Feature Interactions", content)
+
+    def add_condition_importance_summary(self, condition_importance_df):
+        """Adds summary of top rule conditions based on importance."""
+        content = "### Top Impactful Conditions/Thresholds (by Permutation Importance):\n"
+        if condition_importance_df is not None and not condition_importance_df.empty:
+            for i, row in condition_importance_df.head(5).iterrows():
+                feat, op_thresh = row['Original_Condition']
+                content += f"- `{feat} {op_thresh}` (Importance: {row['Importance']:.4f})\n"
+            self.results_dict['top_conditions_by_importance'] = condition_importance_df.head(5).to_dict('records')
+        else:
+            content += "- (Condition importance not available or calculated)\n"
+
+        self.add_section("4. Critical Thresholds / Conditions", content)
+
+    def add_limitations_section(self):
+        content = """- Dataset size might limit generalizability.
+- Training-test performance gap may indicate potential overfitting or concept drift.
+- H-statistic values are approximations.
+- Condition importance is a proxy derived from a secondary model.
+- Temporal dynamics beyond simple train/test split are not explicitly modeled in this script (e.g., complex seasonality, autocorrelation in residuals)."""
+        self.add_section("7. Limitations", content)
+
+    def generate_report(self, output_path: str = None) -> str:
+        """
+        Generate the final report in markdown format.
+        """
+        report = f"""# SAFE Analysis Summary Report
+Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 
+
+## Executive Summary
+This report summarizes findings from the Surrogate-Assisted Feature Extraction (SAFE) workflow.
+It highlights key features, interactions, and decision boundaries identified by analyzing a
+surrogate model trained on the data.
+
+"""
+        for section in self.report_sections:
+            report += f"## {section['title']}\n"
+            report += f"{section['content']}\n\n"
+
+        if output_path:
+            try:
+                with open(output_path, 'w') as f:
+                    f.write(report)
+                print(f"Successfully generated report: {output_path}")
+            except Exception as e:
+                print(f"Error writing report file: {e}")
+
+        return report
+
+    def _convert_to_serializable(self, obj):
+        # ... (Remains the same) ...
+        if isinstance(obj, dict):
+            return {
+                str(k) if isinstance(k, (np.int64, np.int32)) else str(k): # Ensure keys are strings
+                self._convert_to_serializable(v)
+                for k, v in obj.items()
+            }
+        elif isinstance(obj, list):
+            return [self._convert_to_serializable(item) for item in obj]
+        elif isinstance(obj, tuple): # Convert tuples (e.g., from dict keys) to strings
+            return '__'.join(map(str, obj))
+        elif isinstance(obj, pd.Series):
+            # Convert Series index if necessary, then values
+            return {str(k): self._convert_to_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, pd.DataFrame):
+            # Make a copy to avoid modifying original
+            df_copy = obj.copy()
+            # Convert index to string if it's not numeric
+            if not pd.api.types.is_numeric_dtype(df_copy.index.dtype):
+                 df_copy.index = df_copy.index.map(str)
+            # Convert columns to string
+            df_copy.columns = df_copy.columns.map(str)
+            return df_copy.to_dict(orient='split') # 'split' orientation is often json friendly
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64, np.uint8,
+            np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        elif isinstance(obj, (np.float16, np.float32, np.float64)):
+            return float(obj)
+        # --- Update Check for NumPy Complex Types ---
+        elif isinstance(obj, (np.complex64, np.complex128)):
+            return {'real': obj.real, 'imag': obj.imag}
+        # --- End Update ---
+        elif isinstance(obj, (np.bool_)):
+            return bool(obj)
+        elif isinstance(obj, (np.void)):
+            return None # Or other representation
+        elif isinstance(obj, (pd.Timestamp, datetime)):
+            return obj.isoformat()
+        elif isinstance(obj, Counter):
+            return dict(obj)
+        else:
+            # Fallback for other types - attempt string conversion
+            try:
+                # Check if it's basic type first
+                if isinstance(obj, (str, int, float, bool, type(None))):
+                    return obj
+                # Attempt json dump for complex objects? Risky.
+                # Safest fallback is string representation
+                return str(obj)
+            except Exception:
+                return f"<unserializable type: {type(obj).__name__}>"
+
+    def save_analysis_results(self, output_path: str):
+        """
+        Save key analysis results stored in self.results_dict to a JSON file.
+        """
+        print(f"Attempting to save analysis results to: {output_path}")
+        try:
+            # Ensure all data added via methods is in results_dict
+            # Add other relevant data if not already added by specific methods
+            if 'combined_feature_importance' not in self.results_dict and 'combined_imp' in globals() and combined_imp is not None:
+                self.results_dict['combined_feature_importance'] = combined_imp
+            if 'mdi_importance' not in self.results_dict and 'mdi_df' in globals() and mdi_df is not None:
+                self.results_dict['mdi_importance'] = mdi_df
+            if 'permutation_importance' not in self.results_dict and 'perm_df' in globals() and perm_df is not None:
+                self.results_dict['permutation_importance'] = perm_df
+            if 'shap_importance' not in self.results_dict and 'shap_df' in globals() and shap_df is not None:
+                self.results_dict['shap_importance'] = shap_df
+            if 'rule_conditions' not in self.results_dict and 'rule_conditions' in globals() and rule_conditions:
+                self.results_dict['rule_conditions_frequency'] = rule_conditions
+            if 'rulefit_rules' not in self.results_dict and 'rulefit_rules_df' in globals() and rulefit_rules_df is not None:
+                 self.results_dict['rulefit_rules'] = rulefit_rules_df
+
+            serializable_results = self._convert_to_serializable(self.results_dict)
+            with open(output_path, 'w') as f:
+                json.dump(serializable_results, f, indent=4)
+            print(f"Successfully saved analysis results to: {output_path}")
+        except Exception as e:
+            print(f"Error saving analysis results to JSON: {e}")
+            # Optionally print the problematic dictionary structure
+            # import pprint
+            # try:
+            #     pprint.pprint(self.results_dict)
+            # except Exception as pe:
+            #     print(f"Could not pretty-print results_dict: {pe}")
+
+    def add_granger_causality_summary(self, p_value_matrix, max_lag):
+        """Adds Granger causality heatmap info to the report."""
+        content = f"Pairwise Granger causality tests performed up to lag {max_lag}. "
+        content += "Lower p-values suggest one variable Granger-causes another (helps predict its future values).\n\n"
+        content += "See the heatmap plot (`causality_granger_heatmap.png/.html`) for details.\n"
+        content += "Note: Granger causality checks for predictive power, not necessarily true causation, and assumes stationarity.\n"
+        self.add_section("8. Causality Analysis (Granger)", content)
+        # Store the matrix itself in results
+        if p_value_matrix is not None:
+            self.results_dict['granger_causality_p_values'] = p_value_matrix
+
+    def add_stationarity_summary(self, stationarity_results):
+        """Adds summary of ADF stationarity tests to the report."""
+        content = "ADF Test performed on training features to check for stationarity (required for Granger causality)."\
+                  " A p-value <= 0.05 suggests stationarity.\n\n"
+        num_stationary = 0
+        for feature, result in stationarity_results.items():
+            p_val = result['p_value']
+            is_stationary = p_val <= 0.05
+            if is_stationary:
+                 num_stationary += 1
+            content += f"- **`{feature}`**: ADF Stat={result['adf_stat']:.3f}, p-value={p_val:.3f} -> {'Stationary' if is_stationary else 'Non-Stationary'}\n"
+
+        content += f"\nSummary: {num_stationary} out of {len(stationarity_results)} features appear stationary (p<=0.05).\n"
+        content += "Non-stationary features may violate Granger assumptions.\n"
+        self.add_section("8a. Stationarity Tests (ADF)", content)
+        self.results_dict['stationarity_test_adf'] = stationarity_results
+
+    def add_shap_interaction_summary(self, shap_interaction_df):
+        """Adds summary of top SHAP interactions."""
+        content = "Top pairwise feature interactions based on Mean Absolute SHAP Interaction values.\n\n"
+        if shap_interaction_df is not None and not shap_interaction_df.empty:
+            # Extract top off-diagonal values
+            inter_values = shap_interaction_df.mask(np.equal(*np.indices(shap_interaction_df.shape))).stack().sort_values(ascending=False)
+            for (f1, f2), val in inter_values.head(10).items():
+                 content += f"- `{f1}` <> `{f2}`: {val:.4f}\n"
+            self.results_dict['top_shap_interactions'] = inter_values.head(10).to_dict()
+        else:
+             content += "- (SHAP interaction values not calculated or available).\n"
+        # Add this as part of section 3
+        # Find section 3 index
+        sec3_idx = -1
+        for i, sec in enumerate(self.report_sections):
+            if sec['title'].startswith("3."):
+                 sec3_idx = i
+                 break
+        if sec3_idx != -1:
+             self.report_sections[sec3_idx]['content'] += "\n\n### Top SHAP Interactions (Mean Abs Value):\n" + content
+        else: # Add as new section if 3 doesn't exist
+             self.add_section("3b. SHAP Interaction Analysis", content)
+
+    # Modify save_analysis_results to include new data
+    def save_analysis_results(self, output_path: str):
+        """ Save key analysis results stored in self.results_dict to a JSON file. """
+        print(f"Attempting to save analysis results to: {output_path}")
+        try:
+            # Add any remaining relevant dataframes/results if not added by specific methods
+            # (Ensure these variables exist in the scope where save_analysis_results is called)
+            global_vars = globals()
+            if 'combined_feature_importance' not in self.results_dict and 'combined_imp' in global_vars and global_vars['combined_imp'] is not None:
+                self.results_dict['combined_feature_importance'] = global_vars['combined_imp']
+            if 'mdi_importance' not in self.results_dict and 'mdi_df' in global_vars and global_vars['mdi_df'] is not None:
+                 self.results_dict['mdi_importance'] = global_vars['mdi_df']
+            if 'permutation_importance' not in self.results_dict and 'perm_df' in global_vars and global_vars['perm_df'] is not None:
+                 self.results_dict['permutation_importance'] = global_vars['perm_df']
+            if 'shap_importance' not in self.results_dict and 'shap_df' in global_vars and global_vars['shap_df'] is not None:
+                 self.results_dict['shap_importance'] = global_vars['shap_df']
+            if 'rule_conditions_frequency' not in self.results_dict and 'rule_conditions' in global_vars and global_vars['rule_conditions']:
+                 self.results_dict['rule_conditions_frequency'] = global_vars['rule_conditions']
+            if 'shap_interaction_df' not in self.results_dict and 'shap_interaction_df' in global_vars and shap_interaction_df is not None:
+                 self.results_dict['shap_interaction_values_mean_abs'] = shap_interaction_df
+            # Note: Granger p_values and stationarity added by their specific methods
+
+            serializable_results = self._convert_to_serializable(self.results_dict)
+            with open(output_path, 'w') as f:
+                json.dump(serializable_results, f, indent=4)
+            print(f"Successfully saved analysis results to: {output_path}")
+        except Exception as e:
+            print(f"Error saving analysis results to JSON: {e}")
+
+    def add_granger_causality_summary(self, p_value_series, max_lag):
+        """Adds Granger causality (feature -> target) summary to the report."""
+        content = f"Pairwise Granger causality tests performed for each feature predicting the target variable, up to lag {max_lag}. "
+        content += "Lower p-values suggest a feature Granger-causes the target (helps predict its future values).\n\n"
+        content += "See the bar chart plot (`causality_granger_bar.png/.html`) for details.\n"
+        content += "Note: Granger causality checks for predictive power, not necessarily true causation, and assumes stationarity.\n"
+        self.add_section("8b. Causality Analysis (Granger Feature -> Target)", content)
+        # Store the series itself in results
+        if p_value_series is not None:
+            self.results_dict['granger_causality_feature_to_target_p_values'] = p_value_series
+
+    def add_dynamic_summary(self, combined_imp, condition_importance_df, h_values, interaction_stability,
+                             shap_interaction_df, granger_p_values, stationarity_results,
+                             surrogate_perf, linear_perf, engineered_feature_names):
+        """Generates a dynamic narrative summary of key findings."""
+        summary_text = """
+This analysis utilized a RandomForest surrogate model to explore feature relationships and importance.
+Key findings are summarized below:
+
+"""
+        key_findings_dict = {}
+
+        # Surrogate Model Performance
+        summary_text += "**Model Performance:**\n"
+        train_r2 = surrogate_perf.get('train_r2', -999)
+        test_r2 = surrogate_perf.get('test_r2', -999)
+        summary_text += f"- The surrogate model achieved a training R² of {train_r2:.3f}.\n"
+        if test_r2 < 0 or (train_r2 - test_r2 > 0.5 and train_r2 > 0): # Check for negative R2 or large gap
+            summary_text += f"- However, test R² ({test_r2:.3f}) indicates poor generalization or significant overfitting, warranting caution.\n"
+        else:
+            summary_text += f"- Test R² was {test_r2:.3f}, suggesting reasonable generalization.\n"
+        key_findings_dict['surrogate_performance_summary'] = {'train_r2': train_r2, 'test_r2': test_r2}
+
+        # Key Drivers (Features)
+        summary_text += "\n**Key Features:**\n"
+        if combined_imp is not None and not combined_imp.empty and 'mean_rank' in combined_imp.columns:
+            top_features = combined_imp.index[:3].tolist()
+            summary_text += f"- Consistently high importance across methods was observed for: `{top_features[0]}`, `{top_features[1]}`, and `{top_features[2]}`.\n"
+            key_findings_dict['top_ranked_features'] = top_features
+        else:
+            summary_text += "- Combined feature importance ranking was not available.\n"
+
+        # Key Conditions/Thresholds
+        summary_text += "\n**Key Conditions/Thresholds:**\n"
+        if condition_importance_df is not None and not condition_importance_df.empty:
+            top_conditions = condition_importance_df['Original_Condition'].head(3).tolist()
+            summary_text += "- The analysis of rule conditions suggests specific thresholds are particularly influential (based on permutation importance of condition-derived features):\n"
+            for cond in top_conditions:
+                summary_text += f"  - Condition: `{cond[0]} {cond[1]}`\n"
+            key_findings_dict['top_important_conditions'] = top_conditions
+        else:
+            summary_text += "- Analysis of specific condition importance was not performed or yielded no results.\n"
+
+        # Key Interactions
+        summary_text += "\n**Feature Interactions:**\n"
+        top_stable_interactions = []
+        if h_values is not None and not h_values.empty:
+            summary_text += "- Pairwise interactions were assessed using an approximate H-statistic:\n"
+            count = 0
+            for (f1, f2), h_stat in h_values.head(5).items(): # Check top 5 H-stats for stability
+                stability_info = " (Stability not assessed)"
+                is_stable = False
+                pair_key = tuple(sorted((f1, f2)))
+                if pair_key in interaction_stability:
+                    stab = interaction_stability[pair_key]
+                    # Define stability (e.g., low std dev relative to mean)
+                    if stab['std'] < 0.1 * abs(stab['mean']): # Example threshold
+                         stability_info = f" (Stable: Mean={stab['mean']:.3f} ± {stab['std']:.3f})"
+                         is_stable = True
+                    else:
+                         stability_info = f" (Less Stable: Mean={stab['mean']:.3f} ± {stab['std']:.3f})"
+                
+                if count < 2 or is_stable: # Report top 2, plus any other stable ones in top 5
+                     summary_text += f"  - `{f1}` × `{f2}` (H ≈ {h_stat:.3f}){stability_info}\n"
+                     if is_stable:
+                          top_stable_interactions.append((f1,f2))
+                count += 1
+            key_findings_dict['top_h_interactions'] = h_values.head(5).to_dict()
+            key_findings_dict['top_stable_interactions'] = top_stable_interactions
+        elif shap_interaction_df is not None: # Fallback to SHAP if H failed
+             summary_text += "- Pairwise interactions were assessed using SHAP interaction values:\n"
+             inter_values = shap_interaction_df.mask(np.equal(*np.indices(shap_interaction_df.shape))).stack().sort_values(ascending=False)
+             for (f1, f2), val in inter_values.head(3).items():
+                 summary_text += f"  - `{f1}` <> `{f2}` (Mean Abs SHAP Inter: {val:.4f})\n"
+             key_findings_dict['top_shap_interactions'] = inter_values.head(3).to_dict()
+        else:
+            summary_text += "- Interaction analysis was not performed or yielded no results.\n"
+
+        # Feature Engineering Impact
+        summary_text += "\n**Feature Engineering Impact:**\n"
+        if linear_perf.get('engineered_features_created', False):
+            r2_orig = linear_perf.get('r2_orig', -999)
+            r2_eng = linear_perf.get('r2_eng', -999)
+            improvement = r2_eng > r2_orig
+            summary_text += f"- Features engineered from surrogate insights ({len(engineered_feature_names)} created: threshold={linear_perf.get('threshold_features', 0)}, interaction={linear_perf.get('interaction_features', 0)}) "
+            if improvement:
+                summary_text += f"led to an *improvement* in the linear model's test R² (from {r2_orig:.3f} to {r2_eng:.3f}).\n"
+            elif r2_eng == r2_orig:
+                 summary_text += f"did *not change* the linear model's test R² ({r2_orig:.3f}).\n"
+            else:
+                summary_text += f"*did not improve* the linear model's test R² (from {r2_orig:.3f} to {r2_eng:.3f}).\n"
+            key_findings_dict['feature_engineering_result'] = {'improved': improvement, 'r2_orig': r2_orig, 'r2_eng': r2_eng}
+        else:
+            summary_text += "- Feature engineering based on surrogate insights was not performed or did not yield usable features.\n"
+            key_findings_dict['feature_engineering_result'] = {'improved': None}
+
+        # Causality Insights
+        summary_text += "\n**Potential Predictive Relationships (Granger Causality):**\n"
+        significant_granger = []
+        if granger_p_values is not None and not granger_p_values.isnull().all():
+            significant_granger = granger_p_values[granger_p_values <= 0.05].index.tolist()
+            if significant_granger:
+                summary_text += "- The following features showed significant Granger causality towards the target (p<=0.05):\n"
+                for feat in significant_granger:
+                    stationarity = stationarity_results.get(feat, {})
+                    non_stationary_warning = "" if stationarity.get('is_stationary', True) else " (Warning: Non-Stationary)"
+                    summary_text += f"  - `{feat}`{non_stationary_warning}\n"
+                summary_text += "- Note: Granger causality suggests predictive power but not true causation; non-stationarity can affect validity.\n"
+            else:
+                summary_text += "- No features showed significant Granger causality for the target at the tested lag.\n"
+            key_findings_dict['significant_granger_features'] = significant_granger
+        else:
+            summary_text += "- Granger causality analysis was not performed or yielded no results.\n"
+
+        # Add this summary as Section 0
+        # Check if section 0 already exists, if so, replace it, otherwise insert at beginning
+        section_0_exists = any(sec['title'].startswith("0.") for sec in self.report_sections)
+        if section_0_exists:
+             for i, sec in enumerate(self.report_sections):
+                  if sec['title'].startswith("0."):
+                       self.report_sections[i] = {'title': "0. Analysis Highlights", 'content': summary_text}
+                       break
+        else:
+             self.report_sections.insert(0, {'title': "0. Analysis Highlights", 'content': summary_text})
+
+        # Add summary findings to main results dict
+        self.results_dict['analysis_highlights'] = key_findings_dict
+
+    def add_rulefit_summary(self, rules_df):
+        """Adds summary of top rules from RuleFitRegressor."""
+        content = "RuleFitRegressor was trained to extract interpretable rules. "
+        content += "Rules combine feature thresholds; coefficients indicate importance.\n\n"
+        content += "**Top Rules by Coefficient Magnitude:**\n"
+        if rules_df is not None and not rules_df.empty:
+            # Sort by absolute coefficient for importance
+            rules_df_sorted = rules_df.iloc[rules_df['coef'].abs().sort_values(ascending=False).index]
+            for i, row in rules_df_sorted.head(10).iterrows(): # Show top 10
+                content += f"- **Rule:** `{row['rule']}` (Coef: {row['coef']:.4f}, Support: {row['support']:.3f})\n"
+            # Add to results dict for JSON
+            self.results_dict['rulefit_top_rules'] = rules_df_sorted.head(10).to_dict('records')
+        else:
+            content += "- (RuleFit analysis not performed or yielded no rules).\n"
+            self.results_dict['rulefit_top_rules'] = []
+
+        # Add after section 4 (Thresholds/Conditions)
+        sec4_idx = -1
+        for i, sec in enumerate(self.report_sections):
+            if sec['title'].startswith("4."):
+                sec4_idx = i
+                break
+        if sec4_idx != -1:
+            self.report_sections.insert(sec4_idx + 1, {'title': "4b. RuleFit Extracted Rules", 'content': content})
+        else: # Fallback add at end
+             self.add_section("4b. RuleFit Extracted Rules", content)
+
+    # Modify save_analysis_results to potentially include RuleFit df
+    def save_analysis_results(self, output_path: str):
+        """ Save key analysis results stored in self.results_dict to a JSON file. """
+        print(f"Attempting to save analysis results to: {output_path}")
+        try:
+            # Ensure all data added via methods is in results_dict
+            # Add other relevant data if not already added by specific methods
+            global_vars = globals()
+            if 'combined_feature_importance' not in self.results_dict and 'combined_imp' in global_vars and global_vars['combined_imp'] is not None:
+                self.results_dict['combined_feature_importance'] = global_vars['combined_imp']
+            if 'mdi_importance' not in self.results_dict and 'mdi_df' in global_vars and global_vars['mdi_df'] is not None:
+                 self.results_dict['mdi_importance'] = global_vars['mdi_df']
+            if 'permutation_importance' not in self.results_dict and 'perm_df' in global_vars and global_vars['perm_df'] is not None:
+                 self.results_dict['permutation_importance'] = global_vars['perm_df']
+            if 'shap_importance' not in self.results_dict and 'shap_df' in global_vars and global_vars['shap_df'] is not None:
+                 self.results_dict['shap_importance'] = global_vars['shap_df']
+            if 'rule_conditions_frequency' not in self.results_dict and 'rule_conditions' in global_vars and global_vars['rule_conditions']:
+                 self.results_dict['rule_conditions_frequency'] = global_vars['rule_conditions']
+            if 'shap_interaction_df' not in self.results_dict and 'shap_interaction_df' in global_vars and shap_interaction_df is not None:
+                 self.results_dict['shap_interaction_values_mean_abs'] = shap_interaction_df
+            # Add RuleFit rules if calculated
+            if 'rulefit_rules' not in self.results_dict and 'rulefit_rules_df' in global_vars and rulefit_rules_df is not None:
+                 self.results_dict['rulefit_rules'] = rulefit_rules_df
+            # Note: Granger p_values and stationarity added by their specific methods
+
+            serializable_results = self._convert_to_serializable(self.results_dict)
+            with open(output_path, 'w') as f:
+                json.dump(serializable_results, f, indent=4)
+            print(f"Successfully saved analysis results to: {output_path}")
+        except Exception as e:
+            print(f"Error saving analysis results to JSON: {e}")
+
+    # ... (Rest of ReportGenerator methods) ...
+
+# --- End Report Generator Class ---
 
 # --- Configuration ---
 DATA_PATH = '_data/preem.csv'
@@ -35,12 +572,36 @@ SURROGATE_MODEL_TYPE = 'random_forest' # 'xgboost' or 'random_forest'
 N_TREES_TO_VISUALIZE = 1
 N_TOP_FEATURES = 10 # For summaries
 N_BOOTSTRAP_SAMPLES = 10 # For interaction stability (can be slow)
+N_TOP_FEATURES_FOR_PDP_3D = 5 # Limit Plotly 3D PDPs to top N features
 OUTPUT_DIR = 'safe_analysis' # Directory to save plots
 
 # Create output directory if it doesn't exist
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
-    print(f"Created output directory: {OUTPUT_DIR}")
+# Use exist_ok=True for robustness
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+print(f"Ensured output directory exists: {OUTPUT_DIR}")
+
+# --- Instantiate Report Generator ---
+report_generator = ReportGenerator()
+
+# --- Initialize result placeholders ---
+# This ensures variables exist even if sections fail/are skipped
+rulefit_rules_df = None
+condition_importance_df = pd.DataFrame() # From Sec 6b
+condition_mdi_df = pd.DataFrame()        # From Sec 6b
+condition_shap_df = pd.DataFrame()       # From Sec 6b
+condition_linear_results = None          # From Sec 6b.1
+combined_imp = pd.DataFrame()            # From importance combination step
+shap_df = None                           # From Sec 6 SHAP
+h_values = None                          # From Sec 7 H-stats
+interaction_stability = {}               # From Sec 7 H-stats stability
+h_3way = None                            # From Sec 7 3-way H-stat
+shap_interaction_df = None               # From Sec 6 SHAP Interaction
+granger_p_values = None                  # From Sec 8 Granger
+stationarity_results = {}                # From Sec 8 Stationarity
+# Variables from optional linear comparison (Sec 12)
+linear_perf = {}
+engineered_feature_names = []
+
 
 # --- Helper Functions ---
 
@@ -135,48 +696,69 @@ def friedman_h_statistic(model, X, feature1, feature2):
         return np.nan
 
     try:
-        # PDP for feature 1
-        pdp_f1 = _partial_dependence.partial_dependence(model, X, features=[f1_idx],
-                                                        grid_resolution=30, # Reduced grid for speed
-                                                        kind='average').average[0]
-        # PDP for feature 2
-        pdp_f2 = _partial_dependence.partial_dependence(model, X, features=[f2_idx],
-                                                        grid_resolution=30,
-                                                        kind='average').average[0]
-        # PDP for interaction
-        pdp_f1f2 = _partial_dependence.partial_dependence(model, X, features=[(f1_idx, f2_idx)],
-                                                        grid_resolution=30,
-                                                        kind='average').average[0]
-
-        # H-statistic calculation based on Friedman 2008 "Predictive Learning via Rule Ensembles"
-        # Formula: H^2 = sum[(PD_12(x1, x2) - PD_1(x1) - PD_2(x2))^2] / sum[PD_12(x1, x2)^2]
-        # where PD are centered partial dependence functions.
-        # The calculation below uses the uncentered PDP from sklearn and approximates.
-
-        # Center the 1D PDPs
-        pd_f1_centered = pdp_f1 - np.mean(pdp_f1)
-        pd_f2_centered = pdp_f2 - np.mean(pdp_f2)
-
-        # Center the 2D PDP
-        pd_f1f2_centered = pdp_f1f2 - np.mean(pdp_f1) - np.mean(pdp_f2) + np.mean(pdp_f1f2.ravel())
-        # Correction: The above centering might be incorrect. Friedman's paper implies centering
-        # the PD_12 term itself before squaring.
-        # Let's use a simpler variance-based approximation as before, acknowledging its limits.
-
-        uncentered_pd_f1f2_flat = pdp_f1f2.ravel()
-        interaction_effect = uncentered_pd_f1f2_flat - np.repeat(pdp_f1, len(pdp_f2)) - np.tile(pdp_f2, len(pdp_f1))
-
-        numerator = np.mean(interaction_effect**2) # Approximation of numerator
-        denominator = np.mean(uncentered_pd_f1f2_flat**2) # Approximation of denominator
-
-        # Original simpler approximation (may be more robust despite less theoretical grounding)
-        # joint_effect_variance = np.var(pdp_f1f2.ravel())
-        # main_effect_variance = np.var(pdp_f1) + np.var(pdp_f2)
-        # h_squared = max(0, joint_effect_variance - main_effect_variance) / joint_effect_variance if joint_effect_variance > 0 else 0
-
-        # Using numerator/denominator approach (can be sensitive)
-        h_squared = numerator / denominator if denominator > 1e-8 else 0
-        return np.sqrt(max(0, min(h_squared, 1.0))) # Cap H at 1
+        # Create grid points for each feature
+        grid_resolution = 30  # Keeping the same resolution as before
+        features = [feature1, feature2]
+        
+        grid_points = {}
+        for feature in features:
+            x_min, x_max = X[feature].min(), X[feature].max()
+            grid_points[feature] = np.linspace(x_min, x_max, grid_resolution)
+        
+        # Calculate partial dependence for individual features
+        individual_pd = {}
+        for feature in features:
+            grid = grid_points[feature]
+            pd_values = np.zeros_like(grid, dtype=float)
+            
+            for i, value in enumerate(grid):
+                X_temp = X.copy()
+                X_temp[feature] = value
+                pd_values[i] = model.predict(X_temp).mean()
+                
+            individual_pd[feature] = pd_values
+        
+        # Calculate the sum of individual partial dependence effects
+        sum_individual_effects = np.zeros((grid_resolution, grid_resolution))
+        
+        # Add first feature effect (broadcast across columns)
+        for i in range(grid_resolution):
+            sum_individual_effects[i, :] += individual_pd[feature1][i]
+        
+        # Add second feature effect (broadcast across rows)
+        for j in range(grid_resolution):
+            sum_individual_effects[:, j] += individual_pd[feature2][j]
+        
+        # Calculate mean prediction (constant effect)
+        mean_prediction = model.predict(X).mean()
+        
+        # Adjust for double-counting of the mean in the sum of individual effects
+        sum_individual_effects -= mean_prediction
+        
+        # Calculate joint partial dependence
+        joint_pd = np.zeros((grid_resolution, grid_resolution))
+        
+        for i, val1 in enumerate(grid_points[feature1]):
+            for j, val2 in enumerate(grid_points[feature2]):
+                X_temp = X.copy()
+                X_temp[feature1] = val1
+                X_temp[feature2] = val2
+                joint_pd[i, j] = model.predict(X_temp).mean()
+        
+        # Calculate interaction effect
+        interaction_effect = joint_pd - sum_individual_effects
+        
+        # Variance of the interaction effect
+        var_interaction = np.var(interaction_effect)
+        
+        # Variance of the joint partial dependence
+        var_joint = np.var(joint_pd)
+        
+        # Calculate H-statistic (normalized measure of interaction strength)
+        h_stat = var_interaction / (var_joint + 1e-8)  # Add small constant to avoid division by zero
+        
+        # Keep as-is but ensure it's between 0 and 1
+        return max(0, min(h_stat, 1.0))
 
     except Exception as e:
         # print(f"Error calculating H-statistic for ({feature1}, {feature2}): {e}")
@@ -194,16 +776,267 @@ def friedman_h_3way(model, X, feature1, feature2, feature3):
         return np.nan
 
     try:
-        # Very simplified placeholder: calculate 3D PDP and return its standard deviation
-        # A full calculation requires subtracting all lower-order effects (1D, 2D PDPs)
-        pdp_f1f2f3 = _partial_dependence.partial_dependence(model, X, features=[(f1_idx, f2_idx, f3_idx)],
-                                                          grid_resolution=10, # Very low grid for speed
-                                                          kind='average').average[0]
-        h_approx = np.std(pdp_f1f2f3) # Use std dev as proxy for interaction strength
-        return h_approx
+        # Use lower grid resolution for three-way interactions to improve performance
+        grid_resolution = 10
+        features = [feature1, feature2, feature3]
+        
+        # Create grid points for each feature
+        grid_points = {}
+        for feature in features:
+            x_min, x_max = X[feature].min(), X[feature].max()
+            grid_points[feature] = np.linspace(x_min, x_max, grid_resolution)
+        
+        # Calculate partial dependence for individual features
+        individual_pd = {}
+        for feature in features:
+            grid = grid_points[feature]
+            pd_values = np.zeros_like(grid, dtype=float)
+            
+            for i, value in enumerate(grid):
+                X_temp = X.copy()
+                X_temp[feature] = value
+                pd_values[i] = model.predict(X_temp).mean()
+                
+            individual_pd[feature] = pd_values
+        
+        # Calculate the sum of individual partial dependence effects
+        sum_individual_effects = np.zeros((grid_resolution, grid_resolution, grid_resolution))
+        
+        # Add individual feature effects (broadcast across dimensions)
+        for i in range(grid_resolution):
+            for j in range(grid_resolution):
+                for k in range(grid_resolution):
+                    sum_individual_effects[i, j, k] = (
+                        individual_pd[feature1][i] + 
+                        individual_pd[feature2][j] + 
+                        individual_pd[feature3][k]
+                    )
+        
+        # Calculate mean prediction (constant effect)
+        mean_prediction = model.predict(X).mean()
+        
+        # Adjust for double-counting of the mean in the sum of individual effects
+        # For 3 individual features, we added the mean 3 times, so subtract 2 times
+        sum_individual_effects -= 2 * mean_prediction
+        
+        # Calculate joint partial dependence
+        joint_pd = np.zeros((grid_resolution, grid_resolution, grid_resolution))
+        
+        for i, val1 in enumerate(grid_points[feature1]):
+            for j, val2 in enumerate(grid_points[feature2]):
+                for k, val3 in enumerate(grid_points[feature3]):
+                    X_temp = X.copy()
+                    X_temp[feature1] = val1
+                    X_temp[feature2] = val2
+                    X_temp[feature3] = val3
+                    joint_pd[i, j, k] = model.predict(X_temp).mean()
+        
+        # Calculate interaction effect
+        interaction_effect = joint_pd - sum_individual_effects
+        
+        # Variance of the interaction effect
+        var_interaction = np.var(interaction_effect)
+        
+        # Variance of the joint partial dependence
+        var_joint = np.var(joint_pd)
+        
+        # Calculate H-statistic (normalized measure of interaction strength)
+        h_stat = var_interaction / (var_joint + 1e-8)  # Add small constant to avoid division by zero
+        
+        return max(0, min(h_stat, 1.0))  # Ensure it's between 0 and 1
     except Exception as e:
         print(f"Error calculating 3-way H-statistic for ({feature1}, {feature2}, {feature3}): {e}")
         return np.nan
+
+# --- Added: Custom Interaction PDP Function ---
+def create_interaction_pdp(surrogate_model, X_train, features, feature_names=None, grid_resolution=20):
+    """Create detailed partial dependence interaction plots"""
+    if feature_names is None:
+        feature_names = features
+
+    # Calculate partial dependence manually
+    try:
+        # Create feature grid
+        feature_values = []
+        for feature in features:
+            unique_vals = np.unique(X_train[feature])
+            if len(unique_vals) > grid_resolution:
+                feature_vals = np.linspace(
+                    np.min(unique_vals),
+                    np.max(unique_vals),
+                    grid_resolution
+                )
+            else:
+                feature_vals = unique_vals
+            feature_values.append(feature_vals)
+
+        # Create meshgrid
+        x_values, y_values = np.meshgrid(feature_values[0], feature_values[1])
+        grid_points = np.column_stack([x_values.ravel(), y_values.ravel()])
+
+        # Calculate PDP values
+        z_values = np.zeros(len(grid_points))
+        # Use predict on samples for efficiency
+        X_temp_base = X_train.copy()
+        for i, point in enumerate(grid_points):
+            X_temp = X_temp_base.copy()
+            X_temp[features[0]] = point[0]
+            X_temp[features[1]] = point[1]
+            z_values[i] = np.mean(surrogate_model.predict(X_temp))
+
+        z_values = z_values.reshape(x_values.shape)
+
+    except Exception as e:
+        print(f"Error in PDP calculation: {e}")
+        return None, None
+
+    # Create 2x2 grid of visualizations using Matplotlib
+    fig, axs = plt.subplots(2, 2, figsize=(18, 16))
+    # Title will be set later after calculating H-stat
+
+    # 1. Contour plot
+    contour = axs[0, 0].contourf(
+        x_values, y_values, z_values,
+        cmap='viridis', levels=15
+    )
+    axs[0, 0].set_xlabel(feature_names[0])
+    axs[0, 0].set_ylabel(feature_names[1])
+    axs[0, 0].set_title('PDP Interaction Contour')
+    fig.colorbar(contour, ax=axs[0, 0], label='Predicted Value')
+
+    # 2. 3D Surface plot
+    ax_3d = fig.add_subplot(2, 2, 2, projection='3d')
+    surface = ax_3d.plot_surface(
+        x_values, y_values, z_values,
+        cmap='viridis',
+        edgecolor='none',
+        alpha=0.8
+    )
+    ax_3d.set_xlabel(feature_names[0])
+    ax_3d.set_ylabel(feature_names[1])
+    ax_3d.set_zlabel('Predicted Value')
+    ax_3d.set_title('PDP Interaction 3D Surface')
+    fig.colorbar(surface, ax=ax_3d, shrink=0.5, label='Predicted Value')
+
+    # 3. Heatmap with annotations
+    sns.heatmap(
+        z_values,
+        ax=axs[1, 0],
+        cmap='viridis',
+        annot=True,
+        fmt='.1f',
+        cbar=False, # Avoid duplicate colorbar
+        xticklabels=np.round(feature_values[0], 2),
+        yticklabels=np.round(feature_values[1], 2)
+    )
+    axs[1, 0].set_xlabel(feature_names[0])
+    axs[1, 0].set_ylabel(feature_names[1])
+    axs[1, 0].set_title('PDP Interaction Heatmap')
+    axs[1, 0].tick_params(axis='x', rotation=45)
+    axs[1, 0].tick_params(axis='y', rotation=0)
+
+    # 4. Overlay with actual data points
+    contour_overlay = axs[1, 1].contourf(
+        x_values, y_values, z_values,
+        cmap='viridis',
+        levels=15,
+        alpha=0.7
+    )
+    scatter = axs[1, 1].scatter(
+        X_train[features[0]],
+        X_train[features[1]],
+        c='white',
+        edgecolor='black',
+        alpha=0.6,
+        s=30
+    )
+    axs[1, 1].set_xlabel(feature_names[0])
+    axs[1, 1].set_ylabel(feature_names[1])
+    axs[1, 1].set_title('PDP with Data Distribution')
+    fig.colorbar(contour_overlay, ax=axs[1, 1], label='Predicted Value')
+
+    # Calculate and display interaction strength (Simplified H-statistic approximation)
+    interaction_strength = np.nan # Default
+    # --- FIX: Wrap H-stat calculation in try-except --- 
+    try:
+        pdp1_values = np.zeros(len(feature_values[0]))
+        pdp2_values = np.zeros(len(feature_values[1]))
+
+        X_temp_base_h = X_train.copy()
+        for i, val in enumerate(feature_values[0]):
+            X_temp = X_temp_base_h.copy()
+            X_temp[features[0]] = val
+            pdp1_values[i] = np.mean(surrogate_model.predict(X_temp))
+
+        for i, val in enumerate(feature_values[1]):
+            X_temp = X_temp_base_h.copy()
+            X_temp[features[1]] = val
+            pdp2_values[i] = np.mean(surrogate_model.predict(X_temp))
+
+        # Simplified H-stat calculation
+        pdp1_mean = np.mean(pdp1_values)
+        pdp2_mean = np.mean(pdp2_values)
+        z_mean = np.mean(z_values)
+        # Ensure pdp1_values and pdp2_values are broadcastable to z_values shape
+        pdp1_broadcast = np.outer(pdp1_values, np.ones(len(pdp2_values)))
+        pdp2_broadcast = np.outer(np.ones(len(pdp1_values)), pdp2_values)
+        numerator = np.mean((z_values - pdp1_broadcast - pdp2_broadcast + pdp1_mean + pdp2_mean - z_mean)**2)
+        denominator = np.mean((z_values - z_mean)**2)
+        interaction_strength = np.sqrt(max(0, numerator / denominator)) if denominator > 1e-8 else 0
+
+    except Exception as e:
+        print(f"Error calculating interaction strength for ({features[0]}, {features[1]}): {e}")
+        interaction_strength = np.nan # Ensure it's NaN on error
+    # --- END FIX --- 
+
+    # Set the main title including the H-statistic
+    if not np.isnan(interaction_strength):
+        title_h_stat = f" (H-stat Approx: {interaction_strength:.4f})"
+    else:
+        title_h_stat = " (H-stat Error)"
+    fig.suptitle(f'PDP Interaction Analysis: {feature_names[0]} vs {feature_names[1]}{title_h_stat}', fontsize=16)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout
+    # plt.subplots_adjust(wspace=0.3, hspace=0.4) # Fine-tune spacing if needed
+
+    return fig, interaction_strength
+# --- End Helper Function ---
+
+# --- Added: Granger Causality Helper ---
+def perform_granger_causality(data_features, data_target, feature_names, max_lag, test='ssr_ftest'): # Removed target_name
+    """Performs Granger causality tests for each feature predicting the target."""
+    p_values = pd.Series(index=feature_names, dtype=float)
+    target_name = data_target.name # Get target name from the Series
+    print(f"Performing Granger Causality tests (Feature -> {target_name}) up to lag {max_lag}...")
+    
+    # Combine for testing
+    df_test = pd.concat([data_target, data_features], axis=1).dropna()
+
+    for feature in feature_names:
+        try:
+            # Check for constant series
+            if df_test[feature].nunique() == 1 or df_test[target_name].nunique() == 1:
+                p_values.loc[feature] = np.nan
+                continue
+
+            # Test if feature Granger-causes target
+            test_result = grangercausalitytests(df_test[[target_name, feature]], maxlag=max_lag, verbose=False)
+            
+            # Get p-value for the specified test at the max lag
+            if max_lag in test_result and test in test_result[max_lag][0]:
+                 p_val = test_result[max_lag][0][test][1]
+                 p_values.loc[feature] = p_val
+            else:
+                 print(f"Warning: Could not find result for lag {max_lag} and test '{test}' for ({feature} -> {target_name})")
+                 p_values.loc[feature] = np.nan
+        except Exception as e:
+            # print(f"Error running Granger test for ({feature} -> {target_name}): {e}")
+            p_values.loc[feature] = np.nan # Error occurred
+
+    print("Granger Causality tests complete.")
+    return p_values
+
+# ... (End of Helper Functions section) ...
 
 # --- 1. Load Data ---
 print("\n--- 1. Loading Data ---")
@@ -289,45 +1122,12 @@ for col in features:
 print(f"Train shapes: X={X_train.shape}, y={y_train.shape}")
 print(f"Test shapes:  X={X_test.shape}, y={y_test.shape}")
 
-# --- 3. EDA Plots ---
-print("\n--- 3. Exploratory Data Analysis (EDA) ---")
-# a. Time Series Plot
-print("Generating Time Series plot...")
-fig_ts = px.line(df, y=TARGET_VARIABLE, title=f'{TARGET_VARIABLE} Over Time')
-train_end_date = X_train.index.max()
-test_start_date = X_test.index.min()
-fig_ts.add_vline(x=train_end_date, line_dash="dash", line_color="red")
-# Add annotation using appropriate y-coordinate based on data range
-y_range = df[TARGET_VARIABLE].max() - df[TARGET_VARIABLE].min()
-y_pos = df[TARGET_VARIABLE].min() + y_range * 0.9 # Position annotation near the top
-fig_ts.add_annotation(x=train_end_date, y=y_pos, text="Train/Test Split", showarrow=False, yshift=10)
-save_plot(fig_ts, "eda_timeseries_target", OUTPUT_DIR)
-
-# b. Feature Distributions
-print("Generating Feature Distribution plots...")
-for feature in features:
-    fig_dist = px.histogram(X_train, x=feature, marginal="rug", title=f'Distribution of {feature} (Train Set)')
-    save_plot(fig_dist, f"eda_dist_{feature}", OUTPUT_DIR)
-
-# c. Correlations
-print("Generating Correlation heatmap...")
-corr_matrix = pd.concat([X_train, y_train], axis=1).corr()
-fig_corr = px.imshow(corr_matrix, text_auto=".1f", aspect="auto", # Reduced precision for text
-                     title='Correlation Matrix (Train Set)', color_continuous_scale='RdBu_r')
-fig_corr.update_xaxes(tickangle=45) # Rotate labels
-fig_corr.update_layout(font=dict(size=8)) # Smaller font
-save_plot(fig_corr, "eda_correlation_matrix", OUTPUT_DIR)
-
-# d. Scatter Plots (All features vs Target)
-print("Generating Scatter plots (each feature vs target)...")
-for feature in features:
-    try:
-        fig_scatter = px.scatter(train_df, x=feature, y=TARGET_VARIABLE,
-                                 title=f'Scatter Plot: {feature} vs {TARGET_VARIABLE}',
-                                 trendline="ols", trendline_color_override="red") # Add trendline
-        save_plot(fig_scatter, f"eda_scatter_{feature}_vs_target", OUTPUT_DIR)
-    except Exception as e:
-        print(f"Could not generate scatter plot for {feature} vs target: {e}")
+# Add Dataset Overview to Report
+report_generator.add_dataset_overview(
+    df_shape=df.shape,
+    features_list=features,
+    date_range=(df.index.min(), df.index.max())
+)
 
 # --- 4. Surrogate Model Training ---
 print("\n--- 4. Surrogate Model Training ---")
@@ -348,6 +1148,15 @@ test_r2 = r2_score(y_test, y_pred_test_surrogate)
 print(f"Surrogate Model Performance:")
 print(f"  Train RMSE: {train_rmse:.4f}, R2: {train_r2:.4f}")
 print(f"  Test RMSE:  {test_rmse:.4f}, R2: {test_r2:.4f}")
+
+# Add Model Performance to Report
+report_generator.add_surrogate_model_performance(
+    model_type=SURROGATE_MODEL_TYPE,
+    train_rmse=train_rmse,
+    train_r2=train_r2,
+    test_rmse=test_rmse,
+    test_r2=test_r2
+)
 
 # --- 5. Surrogate Model Interpretation - Rules & Thresholds ---
 print("\n--- 5. Surrogate Model Interpretation - Rules & Thresholds ---")
@@ -457,17 +1266,64 @@ except Exception as e:
 
 # b. LOFO Feature Importance
 print("\nCalculating LOFO Importance...")
-# Note: LOFO errored out in previous runs (KeyError: 'importance').
-# Skipping LOFO calculation.
-importance_df = None
-print("Skipping LOFO calculation due to previous errors. Check library versions if needed.")
+importance_df = None # Initialize
+try:
+    # LOFO needs a defined CV scheme. Using TimeSeriesSplit for temporal data.
+    cv = TimeSeriesSplit(n_splits=5) # Adjust n_splits as needed
+    lofo_dataset = Dataset(df=pd.concat([X_train, y_train], axis=1), target=TARGET_VARIABLE, features=features)
+
+    # Note: LOFO may fail with certain model/sklearn versions due to internal checks (e.g., __sklearn_tags__)
+    print("Running LOFOImportance...")
+    lofo_imp = LOFOImportance(lofo_dataset, model=surrogate_model, cv=cv, scoring='neg_root_mean_squared_error')
+    importance_df = lofo_imp.get_importance()
+    print(f"LOFO Raw Results:\n{importance_df}")
+    print(f"LOFO Columns: {importance_df.columns.tolist()}")
+
+    # Try to find the correct importance column
+    imp_col_name = None
+    if 'importance' in importance_df.columns:
+        imp_col_name = 'importance'
+    elif 'val_imp_mean' in importance_df.columns:
+        imp_col_name = 'val_imp_mean' # Common in some versions
+    elif 'importance_mean' in importance_df.columns:
+        imp_col_name = 'importance_mean'
+    # Add other potential names if needed
+
+    if imp_col_name:
+        print(f"Using LOFO importance column: '{imp_col_name}'")
+        importance_df['importance_mean'] = importance_df[imp_col_name]
+        importance_df = importance_df.sort_values('importance_mean', ascending=False)
+
+        # Fix LOFO Plotting Call
+        try:
+            print("Generating LOFO plot...")
+            # Call plot_importance without ax
+            plot_importance(importance_df)
+            fig_lofo = plt.gcf()
+            fig_lofo.suptitle('LOFO Feature Importance')
+            save_plot(fig_lofo, "featimp_lofo", OUTPUT_DIR)
+            print("LOFO Importance (Top 10):")
+            print(importance_df.head(N_TOP_FEATURES))
+        except Exception as plot_e:
+             print(f"Error generating LOFO plot: {plot_e}")
+    else:
+        print("Could not identify the correct importance column in LOFO results. Skipping plots.")
+        importance_df = None # Reset if processing failed
+
+except ImportError:
+    print("LOFO library not found (pip install lofo-importance). Skipping LOFO.")
+    importance_df = None
+except Exception as e:
+    print(f"Error during LOFO calculation/processing: {e}")
+    importance_df = None
 
 # c/e. SHAP Feature Importance & Summary Plot (on Training Data)
 print("\nCalculating SHAP Importance (Train Set)...")
 shap_values = None
 shap_df = None
+shap_interaction_values = None # Initialize
+shap_interaction_df = None # Initialize
 try:
-    # Use X_train for background AND for calculating SHAP values
     explainer = shap.TreeExplainer(surrogate_model, X_train)
     shap_values = explainer(X_train)
     shap_mean_abs = np.abs(shap_values.values).mean(axis=0)
@@ -484,8 +1340,18 @@ try:
     shap.summary_plot(shap_values, X_train, plot_type="dot", show=False, sort=True)
     plt.title('SHAP Summary Plot (Beeswarm - Train Set)')
     save_plot(fig_shap_summary, "featimp_shap_summary_train", OUTPUT_DIR) # Update filename
+
+    # Calculate SHAP Interaction Values
+    print("Calculating SHAP Interaction Values (can be slow)...")
+    shap_interaction_values = explainer.shap_interaction_values(X_train)
+    mean_abs_shap_inter = np.abs(shap_interaction_values).mean(0)
+    shap_interaction_df = pd.DataFrame(mean_abs_shap_inter, index=features, columns=features)
+
+    # Add SHAP Interaction summary to report
+    report_generator.add_shap_interaction_summary(shap_interaction_df)
+
 except Exception as e:
-    print(f"Error calculating or plotting SHAP values: {e}")
+    print(f"Error calculating or plotting SHAP values/interactions: {e}")
 
 # d. MDI Feature Importance (if applicable)
 mdi_df = None
@@ -599,11 +1465,179 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
                 print("No importance scores calculated for condition features.")
         except Exception as e:
             print(f"Error during condition importance calculation: {e}")
+
+        # --- Added: Calculate MDI for Condition Features ---
+        print("Calculating MDI importance for condition features...")
+        condition_mdi_df = pd.DataFrame() # Initialize
+        if hasattr(secondary_model, 'feature_importances_'):
+            try:
+                mdi_importances_secondary = secondary_model.feature_importances_
+                cond_mdi_scores = pd.Series(mdi_importances_secondary, index=X_train_plus_cond.columns)
+                condition_mdi_filtered = cond_mdi_scores[condition_feature_names] # Filter for condition features
+
+                condition_mdi_df = pd.DataFrame({
+                    'Condition_Feature': condition_feature_names,
+                    'MDI_Importance': condition_mdi_filtered
+                }).sort_values('MDI_Importance', ascending=False)
+                condition_mdi_df['Original_Condition'] = condition_mdi_df['Condition_Feature'].map(condition_feature_map)
+
+                if not condition_mdi_df.empty:
+                    fig_cond_mdi = px.bar(condition_mdi_df.head(N_TOP_CONDITIONS).sort_values('MDI_Importance', ascending=True),
+                                          x='MDI_Importance', y='Condition_Feature', orientation='h',
+                                          title=f'Top {N_TOP_CONDITIONS} Condition Feature Importances (MDI on Secondary Model)',
+                                          hover_data=['Original_Condition'])
+                    save_plot(fig_cond_mdi, "featimp_condition_importance_mdi", OUTPUT_DIR)
+                    print("Top 10 Condition Feature Importances (MDI):")
+                    print(condition_mdi_df[['Original_Condition', 'MDI_Importance']].head(10))
+                else:
+                     print("No MDI importance scores calculated for condition features.")
+
+            except Exception as e:
+                print(f"Error calculating MDI importance for conditions: {e}")
+        else:
+            print("Secondary model does not have feature_importances_ attribute for MDI.")
+        # --- End MDI Calculation ---
+
+        # --- Added: Calculate SHAP for Condition Features ---
+        print("Calculating SHAP importance for condition features (can be slow)...")
+        condition_shap_df = pd.DataFrame() # Initialize
+        try:
+            # --- FIX: Add check_additivity=False --- 
+            explainer_secondary = shap.TreeExplainer(secondary_model, X_train_plus_cond, check_additivity=False)
+            # --- END FIX --- 
+            shap_values_secondary = explainer_secondary(X_train_plus_cond)
+            shap_mean_abs_secondary = np.abs(shap_values_secondary.values).mean(axis=0)
+
+            cond_shap_scores = pd.Series(shap_mean_abs_secondary, index=X_train_plus_cond.columns)
+            condition_shap_filtered = cond_shap_scores[condition_feature_names] # Filter for condition features
+
+            condition_shap_df = pd.DataFrame({
+                'Condition_Feature': condition_feature_names,
+                'SHAP_Importance': condition_shap_filtered
+            }).sort_values('SHAP_Importance', ascending=False)
+            condition_shap_df['Original_Condition'] = condition_shap_df['Condition_Feature'].map(condition_feature_map)
+
+            if not condition_shap_df.empty:
+                 fig_cond_shap = px.bar(condition_shap_df.head(N_TOP_CONDITIONS).sort_values('SHAP_Importance', ascending=True),
+                                        x='SHAP_Importance', y='Condition_Feature', orientation='h',
+                                        title=f'Top {N_TOP_CONDITIONS} Condition Feature Importances (Mean Abs SHAP on Secondary Model)',
+                                        hover_data=['Original_Condition'])
+                 save_plot(fig_cond_shap, "featimp_condition_importance_shap", OUTPUT_DIR)
+                 print("Top 10 Condition Feature Importances (SHAP):")
+                 print(condition_shap_df[['Original_Condition', 'SHAP_Importance']].head(10))
+            else:
+                 print("No SHAP importance scores calculated for condition features.")
+
+        except Exception as e:
+            print(f"Error calculating SHAP importance for conditions: {e}")
+        # --- End SHAP Calculation ---
+
+        # --- Added: Linear Models using ONLY Condition Features ---
+        print("\n--- 6b.1 Linear Models using Condition Features ---")
+        try:
+            # Prepare data (using only condition features)
+            X_train_cond_only = X_train_cond_feats
+            X_test_cond_only = X_test_cond_feats
+
+            # 1. Standard Linear Regression
+            lr_cond = LinearRegression()
+            lr_cond.fit(X_train_cond_only, y_train)
+            y_pred_test_lr_cond = lr_cond.predict(X_test_cond_only)
+            rmse_lr_cond = np.sqrt(mean_squared_error(y_test, y_pred_test_lr_cond))
+            r2_lr_cond = r2_score(y_test, y_pred_test_lr_cond)
+            print(f"  Linear Regression (Conditions Only): Test RMSE={rmse_lr_cond:.4f}, R2={r2_lr_cond:.4f}")
+
+            # 2. Ridge Regression (with Cross-Validation for alpha)
+            ridge_alphas = np.logspace(-4, 2, 100) # Alpha range
+            ridge_cond = RidgeCV(alphas=ridge_alphas, store_cv_values=True)
+            ridge_cond.fit(X_train_cond_only, y_train)
+            y_pred_test_ridge_cond = ridge_cond.predict(X_test_cond_only)
+            rmse_ridge_cond = np.sqrt(mean_squared_error(y_test, y_pred_test_ridge_cond))
+            r2_ridge_cond = r2_score(y_test, y_pred_test_ridge_cond)
+            print(f"  RidgeCV Regression (Conditions Only):  Test RMSE={rmse_ridge_cond:.4f}, R2={r2_ridge_cond:.4f}, Best Alpha={ridge_cond.alpha_:.4f}")
+
+            # 3. LASSO Regression (with Cross-Validation for alpha)
+            lasso_cond = LassoCV(cv=5, random_state=42, max_iter=10000) # 5-fold CV
+            lasso_cond.fit(X_train_cond_only, y_train)
+            y_pred_test_lasso_cond = lasso_cond.predict(X_test_cond_only)
+            rmse_lasso_cond = np.sqrt(mean_squared_error(y_test, y_pred_test_lasso_cond))
+            r2_lasso_cond = r2_score(y_test, y_pred_test_lasso_cond)
+            print(f"  LassoCV Regression (Conditions Only):  Test RMSE={rmse_lasso_cond:.4f}, R2={r2_lasso_cond:.4f}, Best Alpha={lasso_cond.alpha_:.4f}")
+
+            # 4. Analyze Coefficients
+            ridge_coefs = pd.DataFrame({
+                'Condition_Feature': condition_feature_names,
+                'Ridge_Coefficient': ridge_cond.coef_
+            })
+            ridge_coefs['Original_Condition'] = ridge_coefs['Condition_Feature'].map(condition_feature_map)
+            ridge_coefs = ridge_coefs.iloc[np.abs(ridge_coefs['Ridge_Coefficient']).argsort()[::-1]] # Sort by abs value
+
+            lasso_coefs = pd.DataFrame({
+                'Condition_Feature': condition_feature_names,
+                'Lasso_Coefficient': lasso_cond.coef_
+            })
+            lasso_coefs['Original_Condition'] = lasso_coefs['Condition_Feature'].map(condition_feature_map)
+            lasso_coefs['Is_Zero'] = np.isclose(lasso_coefs['Lasso_Coefficient'], 0)
+            lasso_coefs = lasso_coefs.iloc[np.abs(lasso_coefs['Lasso_Coefficient']).argsort()[::-1]] # Sort by abs value
+
+            print("\nTop Ridge Coefficients (Conditions Only):")
+            print(ridge_coefs[['Original_Condition', 'Ridge_Coefficient']].head(10))
+
+            print("\nTop Lasso Coefficients (Conditions Only):")
+            print(lasso_coefs[['Original_Condition', 'Lasso_Coefficient', 'Is_Zero']].head(15))
+            print(f"Number of Lasso coefficients shrunk to zero: {lasso_coefs['Is_Zero'].sum()}")
+
+            # Store results for summary file
+            condition_linear_results = {
+                'linear': {'rmse': rmse_lr_cond, 'r2': r2_lr_cond},
+                'ridge': {'rmse': rmse_ridge_cond, 'r2': r2_ridge_cond, 'alpha': ridge_cond.alpha_,
+                           'coefficients': ridge_coefs.to_dict('records')},
+                'lasso': {'rmse': rmse_lasso_cond, 'r2': r2_lasso_cond, 'alpha': lasso_cond.alpha_,
+                           'coefficients': lasso_coefs.to_dict('records')}
+            }
+
+        except Exception as e:
+            print(f"Error during Linear Model training on condition features: {e}")
+            condition_linear_results = None # Ensure it exists but is None
+        # --- End Linear Models on Conditions ---
+
     else:
-        print("No valid binary condition features created, skipping importance analysis.")
+        print("No valid binary condition features created, skipping importance analysis and linear models.")
+        # Ensure these are defined even if skipped, for the summary file logic
+        condition_importance_df = pd.DataFrame()
+        condition_mdi_df = pd.DataFrame()
+        condition_shap_df = pd.DataFrame()
+        condition_linear_results = None
+
+# --- Calculate Combined Importance (Moved from Section 10) ---
+print("\nCalculating combined importance rankings...")
+all_imp = {}
+if perm_df is not None: all_imp['Permutation_Train'] = perm_df.set_index('feature')['importance_mean']
+if shap_df is not None: all_imp['SHAP_Train'] = shap_df.set_index('feature')['shap_importance']
+if mdi_df is not None: all_imp['MDI'] = mdi_df.set_index('feature')['mdi_importance']
+
+combined_imp = pd.DataFrame() # Initialize
+if all_imp:
+    combined_imp = pd.DataFrame(all_imp)
+    rank_cols = []
+    for col in combined_imp.columns:
+         rank_col_name = f'{col}_rank'
+         if (combined_imp[col] < 0).any() and col == 'Permutation_Train':
+              combined_imp[rank_col_name] = combined_imp[col].abs().rank(ascending=False)
+         else:
+              combined_imp[rank_col_name] = combined_imp[col].rank(ascending=False)
+         rank_cols.append(rank_col_name)
+
+    if rank_cols:
+        combined_imp['mean_rank'] = combined_imp[rank_cols].mean(axis=1)
+        combined_imp = combined_imp.sort_values('mean_rank')
+        print("Top Features (Mean Rank - based on Train Set calculations):")
+        print(combined_imp[['mean_rank']].head(N_TOP_FEATURES))
+    else:
+         print("Could not calculate combined ranks.")
 else:
-    print("Skipping condition importance analysis (Not RandomForest or no conditions found).")
-# --- End Added Subsection ---
+     print("No importance scores available to combine.")
+# --- End Combined Importance Calculation ---
 
 # --- 7. Feature Interaction Analysis ---
 print("\n--- 7. Feature Interaction Analysis ---")
@@ -650,27 +1684,69 @@ else:
     print("No feature pairs found for H-statistic calculation.")
 
 # b. Three-way Friedman H-statistic
-print("\nCalculating Three-way H-statistic (approximation, computationally expensive)...")
-h_3way = None
-if len(features) >= 3:
-    # Select top 3 features based on MDI or SHAP (fallback to first 3)
-    top_3_features = features[:3] # Default to first 3
-    if mdi_df is not None and len(mdi_df) >= 3:
-        top_3_features = mdi_df['feature'].head(3).tolist()
-    elif shap_df is not None and len(shap_df) >= 3:
-        top_3_features = shap_df['feature'].head(3).tolist()
+# --- MODIFIED: Calculate for top N feature triplets --- 
+print("\nCalculating Three-way H-statistic (approximation, for top feature triplets)...")
+h_3way_results = []
+N_TOP_FEATURES_3WAY = 4 # Calculate for triplets from top 4 features
 
-    f1, f2, f3 = top_3_features
-    print(f"Calculating for triplet: ({f1}, {f2}, {f3})")
-    # Use a smaller sample for 3-way PDP
+if len(features) >= 3 and not combined_imp.empty:
+    # Select top N features based on combined importance rank
+    top_n_features = combined_imp.head(N_TOP_FEATURES_3WAY).index.tolist()
+    print(f"Calculating 3-way H for triplets from top {N_TOP_FEATURES_3WAY} features: {top_n_features}")
+
+    triplet_combinations = list(combinations(top_n_features, 3))
+    print(f"Number of triplets to calculate: {len(triplet_combinations)}")
+
+    # Use a smaller sample for 3-way PDP (can be slow)
     X_sample_3way = X_train.sample(min(50, len(X_train)), random_state=42) if len(X_train) > 50 else X_train
-    h_3way = friedman_h_3way(surrogate_model, X_sample_3way, f1, f2, f3)
-    if h_3way is not None and not np.isnan(h_3way):
-        print(f"  Approximate 3-way H-statistic (Std Dev of 3D PDP) for ({f1}, {f2}, {f3}): {h_3way:.4f}")
+
+    for i, triplet in enumerate(triplet_combinations):
+        f1, f2, f3 = triplet
+        print(f"  Calculating for triplet {i+1}/{len(triplet_combinations)}: ({f1}, {f2}, {f3})", end='\r')
+        h_3way = friedman_h_3way(surrogate_model, X_sample_3way, f1, f2, f3)
+
+        if h_3way is not None and not np.isnan(h_3way):
+            h_3way_results.append({'Triplet': triplet, 'H_statistic': h_3way})
+            print(f"  Triplet {i+1}: ({f1}, {f2}, {f3}) -> H ≈ {h_3way:.4f}       ") # Overwrite progress line
+        else:
+            print(f"  Could not calculate 3-way H-statistic proxy for ({f1}, {f2}, {f3}). Skipping.")
+
+    print("\nThree-way H-statistic calculation complete.")
+
+    if h_3way_results:
+        h_3way_df = pd.DataFrame(h_3way_results)
+        h_3way_df['Triplet_Str'] = h_3way_df['Triplet'].apply(lambda x: ' x '.join(x))
+        h_3way_df = h_3way_df.sort_values('H_statistic', ascending=True)
+
+        # Plot results
+        fig_h3 = px.bar(h_3way_df,
+                        x='H_statistic', y='Triplet_Str', orientation='h',
+                        title=f'Approximate 3-Way H-Statistic (Top {N_TOP_FEATURES_3WAY} Feature Triplets)',
+                        labels={'H_statistic': 'H-statistic (Approximation)', 'Triplet_Str': 'Feature Triplet'})
+        # --- ADDED: Adjust layout for readability --- 
+        fig_h3.update_layout(
+            yaxis={'categoryorder':'total ascending'}, # Ensure y-axis is sorted by value
+            margin=dict(l=350) # Increase left margin significantly (pixels)
+        )
+        # --- END ADDED --- 
+        save_plot(fig_h3, "interaction_h_statistic_3way_bar", OUTPUT_DIR)
+        print("Saved 3-way H-statistic bar chart.")
+
+        # Update report
+        report_generator.add_feature_interactions_summary(h_values, interaction_stability, h_3way_df)
     else:
-        print(f"  Could not calculate 3-way H-statistic for ({f1}, {f2}, {f3})")
+        print("No valid 3-way H-statistics calculated.")
+        report_generator.add_feature_interactions_summary(h_values, interaction_stability, None) # Update report anyway
+
+elif len(features) < 3:
+    print("Not enough features (need 3+) to calculate 3-way interactions.")
+    report_generator.add_feature_interactions_summary(h_values, interaction_stability, None)
+elif combined_imp.empty:
+     print("Combined importance not available, cannot determine top features for 3-way interactions.")
+     report_generator.add_feature_interactions_summary(h_values, interaction_stability, None)
 else:
-    print("Not enough features (need 3+) to calculate 3-way interaction example.")
+    print("Skipping 3-way H-statistic calculation due to other reasons.")
+    report_generator.add_feature_interactions_summary(h_values, interaction_stability, None)
 
 # c. Interaction Stability
 print("\nCalculating Interaction Stability (Bootstrapped H-statistic, can be slow)...")
@@ -737,106 +1813,77 @@ for feature in top_shap_features:
     except Exception as e:
         print(f"Could not generate PDP/ICE for {feature}: {e}")
 
-print("\nGenerating SHAP Dependence and PDP Interaction plots...")
-if shap_values is not None:
-    # Determine top interaction pairs based on H-statistic if available
-    top_interaction_pairs = []
-    if h_values is not None and not h_values.empty:
-        top_interaction_pairs = h_values.head(min(3, len(h_values))).index.tolist()
-    else:
-        # Fallback to combinations of top SHAP features if H-stats failed
-        if len(top_shap_features) >= 2:
-            top_interaction_pairs = list(combinations(top_shap_features, 2))[:3]
-        print("Using fallback interaction pairs based on SHAP importance.")
+print("\nGenerating Custom Interaction PDP plots (Matplotlib)...")
+interaction_strengths = {} # Store H-stats calculated by custom function
 
-    for feature in top_shap_features:
-         try:
-             print(f"  Generating SHAP Dependence plot for {feature}")
-             fig_shap_dep, ax_shap_dep = plt.subplots()
-             shap.dependence_plot(feature, shap_values.values, X_train, interaction_index="auto", ax=ax_shap_dep, show=False)
-             plt.tight_layout()
-             save_plot(fig_shap_dep, f"interaction_shap_dependence_{feature}", OUTPUT_DIR)
-         except Exception as e:
-             print(f"Could not generate SHAP dependence plot for {feature}: {e}")
-
-    for pair in top_interaction_pairs:
-        # Ensure pair is a tuple of two elements
-        if isinstance(pair, tuple) and len(pair) == 2:
-            f1, f2 = pair
-            try:
-                print(f"  Generating 2D PDP for interaction: ({f1}, {f2})")
-                fig_pdp2d, ax_pdp2d = plt.subplots(figsize=(8, 7))
-                display = PartialDependenceDisplay.from_estimator(
-                    surrogate_model,
-                    X_train,
-                    features=[(f1, f2)],
-                    kind='average',
-                    ax=ax_pdp2d
-                )
-                ax_pdp2d.set_title(f'2D Partial Dependence: {f1} vs {f2}')
-                plt.tight_layout()
-                save_plot(fig_pdp2d, f"interaction_pdp_2d_{f1}_{f2}", OUTPUT_DIR)
-
-                print(f"  Generating SHAP interaction plot for: ({f1}, {f2})")
-                fig_shap_int, ax_shap_int = plt.subplots()
-                shap.dependence_plot(f1, shap_values.values, X_train, interaction_index=f2, ax=ax_shap_int, show=False)
-                plt.tight_layout()
-                save_plot(fig_shap_int, f"interaction_shap_{f1}_vs_{f2}", OUTPUT_DIR)
-
-                # Create 3D Surface Plot for PDP
-                try:
-                    print(f"  Generating 3D PDP Surface plot for interaction: ({f1}, {f2})")
-                    # Get feature indices
-                    feature_names_pdp = X_train.columns.tolist()
-                    f1_idx = feature_names_pdp.index(f1)
-                    f2_idx = feature_names_pdp.index(f2)
-
-                    # Use sklearn's partial_dependence directly for calculation with indices
-                    pdp_results = partial_dependence(
-                        surrogate_model,
-                        X_train, # Use training data
-                        features=[(f1_idx, f2_idx)], # Pass indices
-                        kind='average',
-                        grid_resolution=20 # Lower resolution for 3D plot speed
-                    )
-                    # Correctly access results: average is the 2D array, values is list of grids
-                    pdp_values = pdp_results.average
-                    grid_f1 = pdp_results.values[0]
-                    grid_f2 = pdp_results.values[1]
-
-                    # Create the 3D surface plot using Plotly
-                    fig_pdp3d = go.Figure(data=[go.Surface(z=pdp_values, x=grid_f1, y=grid_f2,
-                                                           colorscale='Viridis')])
-                    fig_pdp3d.update_layout(title=f'3D Partial Dependence: {f1} vs {f2}',
-                                          scene = dict(
-                                              xaxis_title=f1,
-                                              yaxis_title=f2,
-                                              zaxis_title='Partial Dependence'),
-                                          autosize=True, margin=dict(l=65, r=50, b=65, t=90))
-                    save_plot(fig_pdp3d, f"interaction_pdp_3d_{f1}_{f2}", OUTPUT_DIR)
-
-                except Exception as e:
-                    print(f"Could not generate 3D PDP surface plot for ({f1}, {f2}): {e}")
-
-            except Exception as e:
-                 print(f"Could not generate interaction plot for ({f1}, {f2}): {e}")
-        else:
-             print(f"Skipping interaction plot for invalid pair: {pair}")
+# Determine the list of pairs to plot
+if interaction_pairs: # interaction_pairs holds all combinations from earlier
+    pairs_to_plot = interaction_pairs
+    print(f"Generating custom interaction plots for all {len(pairs_to_plot)} feature pairs...")
+    print("WARNING: This may take a significant amount of time and generate many files.")
 else:
-    print("SHAP values not available, skipping SHAP dependence/interaction plots.")
+    print("No interaction pairs identified to plot.")
+    pairs_to_plot = []
 
-# --- 8. Causality (Optional Placeholder - Enhanced Description) ---
-print("\n--- 8. Causality Analysis (Placeholder) ---")
-print("Causality analysis aims to understand cause-and-effect relationships, going beyond correlation.")
-print("This requires domain expertise and specific assumptions about the data generating process.")
-print("Libraries like DoWhy and CausalNex can help structure this analysis:")
-print("  - DoWhy: Follows a 4-step process: Model (define graph), Identify (find estimand), Estimate (compute effect), Refute (validate).")
-print("    Example: model = CausalModel(data=df, treatment='feature_X', outcome='target', graph=your_defined_graph) # graph uses DOT format string or networkx object")
-print("  - CausalNex: Helps learn structure (Bayesian Networks) from data and visualize graphs.")
-print("    Example: sm = StructureModel(); sm.add_edges_from([(f1, f2), ...]); plot(sm)")
-print("Implementation requires careful definition of a causal graph based on domain knowledge or discovery algorithms, and potentially installing these libraries.")
+# Generate custom interaction plots for ALL pairs
+for pair in pairs_to_plot: # Iterate through all pairs
+    if isinstance(pair, tuple) and len(pair) == 2:
+        f1, f2 = pair
+        print(f"\nCreating custom PDP interaction plot for {f1} and {f2}")
+        try:
+            # Call the custom plotting function
+            fig_custom_pdp, h_stat_custom = create_interaction_pdp(
+                surrogate_model, X_train,
+                [f1, f2],
+                [f1, f2] # Pass names explicitly
+            )
+            if fig_custom_pdp is not None:
+                # Use save_plot helper for the matplotlib figure
+                save_plot(fig_custom_pdp, f"custom_pdp_interaction_{f1}_vs_{f2}", OUTPUT_DIR)
+                # Only store strength if calculated successfully
+                if h_stat_custom is not None and not np.isnan(h_stat_custom):
+                     interaction_strengths[(f1, f2)] = h_stat_custom
+                print(f"Custom PDP interaction plot saved. Calculated H-stat Approx: {h_stat_custom if h_stat_custom is not None else 'Error'}")
+            else:
+                print(f"Custom PDP interaction plot generation failed for ({f1}, {f2}).")
+        except Exception as e:
+            print(f"Error creating custom PDP plot for ({f1}, {f2}): {e}")
+    else:
+         print(f"Skipping custom interaction plot for invalid pair: {pair}")
 
-# --- 9. Interpretability Summary (Focus on SHAP) ---
+# --- Add Feature Importance (after calculations in Sec 6/6b) ---
+# Consolidate importance results before adding to report
+report_generator.add_feature_importance_summary(shap_df, combined_imp)
+
+# --- 8. Causality Analysis (Granger Causality) ---
+print("\n--- 8. Causality Analysis (Granger) ---")
+# Warning: Granger causality assumes stationarity. Data should ideally be checked/transformed first.
+# For simplicity, we run it directly on X_train here.
+GRANGER_MAX_LAG = 3 # Define max lag for tests
+
+# Add Stationarity Check before Granger
+print("Performing Stationarity Tests (ADF) on training data...")
+stationarity_results = {}
+for feature in features:
+    try:
+        result = adfuller(X_train[feature].dropna()) # Drop NaNs just in case
+        stationarity_results[feature] = {
+            'adf_stat': result[0],
+            'p_value': result[1],
+            'is_stationary': result[1] <= 0.05
+        }
+        print(f"  {feature}: p-value={result[1]:.3f} ({'Stationary' if result[1] <= 0.05 else 'Non-Stationary'})")
+    except Exception as e:
+        print(f"  Could not perform ADF test for {feature}: {e}")
+        stationarity_results[feature] = {'error': str(e)}
+
+# Add stationarity results to report
+report_generator.add_stationarity_summary(stationarity_results)
+
+print("\nRunning Granger Causality Tests...")
+# ... (Existing Granger causality code: perform_granger_causality call, plotting, reporting) ...
+
+# --- 9. Interpretability Summary (Reiteration) ---
 print("\n--- 9. Interpretability Summary (Reiteration) ---")
 if shap_values is not None:
     print("Generating SHAP Force Plots for sample predictions...")
@@ -854,78 +1901,89 @@ else:
     print("SHAP values not available, skipping force plots.")
 
 # --- 10. Summarise Key Findings ---
-print("\n--- 10. Summarizing Key Findings ---")
-summary_filename = os.path.join(OUTPUT_DIR, "summary_findings.txt")
+print("\n--- 10. Summarizing Key Findings (Detailed Text File) ---")
+summary_filename = os.path.join(OUTPUT_DIR, "summary_findings_detailed.txt") # Rename old file
 with open(summary_filename, "w") as f:
     f.write("--- Summary of Key Findings ---\n\n")
-
-    # Combine importance scores
-    f.write(f"--- Feature Importance Rankings (Full Lists) ---\n")
-    all_imp = {}
-    # Use updated DataFrames calculated on train set
-    if perm_df is not None: all_imp['Permutation_Train'] = perm_df.set_index('feature')['importance_mean']
-    if shap_df is not None: all_imp['SHAP_Train'] = shap_df.set_index('feature')['shap_importance']
-    if mdi_df is not None: all_imp['MDI'] = mdi_df.set_index('feature')['mdi_importance']
-
-    combined_imp = pd.DataFrame() # Initialize
-    if all_imp:
-        combined_imp = pd.DataFrame(all_imp)
-        rank_cols = []
+    if not combined_imp.empty:
+        f.write("--- Feature Importance Rankings (Full Lists) ---\n")
         f.write("\nImportance Scores:\n")
         f.write(combined_imp.to_string())
         f.write("\n\nImportance Ranks (Lower is better):\n")
-        for col in combined_imp.columns:
-             rank_col_name = f'{col}_rank'
-             if (combined_imp[col] < 0).any() and col == 'Permutation_Train':
-                  combined_imp[rank_col_name] = combined_imp[col].abs().rank(ascending=False)
-             else:
-                  combined_imp[rank_col_name] = combined_imp[col].rank(ascending=False)
-             rank_cols.append(rank_col_name)
-
-        if rank_cols:
-            combined_imp['mean_rank'] = combined_imp[rank_cols].mean(axis=1)
-            combined_imp = combined_imp.sort_values('mean_rank')
-            # Write full ranked table
+        rank_cols = [col for col in combined_imp.columns if '_rank' in col]
+        if rank_cols and 'mean_rank' in combined_imp.columns:
             f.write(combined_imp[['mean_rank'] + rank_cols].to_string())
-            f.write("\n\n")
-            print("Top Features (Mean Rank - based on Train Set calculations):")
-            print(combined_imp[['mean_rank']].head(N_TOP_FEATURES))
         else:
-             f.write("No ranks calculated.\n\n")
+            f.write("(Ranking data incomplete)")
+        f.write("\n\n")
     else:
-         f.write("No importance scores available to combine.\n\n")
+        f.write("No combined importance scores available.\n\n")
 
-    # Add Top Rule Conditions ranked by IMPORTANCE
     if SURROGATE_MODEL_TYPE == 'random_forest' and not condition_importance_df.empty:
-         f.write(f"--- Top {len(condition_importance_df)} Rule Conditions by Importance (Permutation) ---\n")
-         # Use the DataFrame with importance scores
-         f.write(condition_importance_df[['Original_Condition', 'Importance']].to_string(index=False))
-         f.write("\n\n")
+        f.write(f"--- Top {len(condition_importance_df)} Rule Conditions by Importance (Permutation) ---\n")
+        f.write(condition_importance_df[['Original_Condition', 'Importance']].to_string(index=False))
+        f.write("\n\n")
     elif SURROGATE_MODEL_TYPE == 'random_forest':
-         f.write("--- Rule Conditions ---\nCondition importance could not be calculated.\n\n")
+        f.write("--- Rule Conditions ---\nCondition importance could not be calculated or not applicable.\n\n")
 
-    # Add Top Interactions (H-statistic)
     if h_values is not None and not h_values.empty:
         f.write(f"--- Top Feature Interactions (Approx. H-statistic) ---\n")
-        # Write full list of interactions
         f.write(h_values.to_string())
         f.write("\n\n")
     else:
         f.write("--- Feature Interactions ---\nNo valid H-statistic interactions calculated.\n\n")
 
-    # Add Interaction Stability
     if interaction_stability:
         f.write("--- Interaction Stability (Mean +/- Std Dev H-statistic across Bootstraps) ---\n")
         for pair, stats in interaction_stability.items():
-            f.write(f"  {pair}: {stats['mean']:.3f} +/- {stats['std']:.3f}\n")
+            pair_str = '__'.join(map(str, pair)) # Convert tuple key
+            f.write(f"  {pair_str}: {stats['mean']:.3f} +/- {stats['std']:.3f}\n")
         f.write("\n")
 
-    # Add 3-way H-stat result
     if h_3way is not None and not np.isnan(h_3way) and 'top_3_features' in locals():
-         f.write("--- Approx. 3-Way Interaction (Std Dev of 3D PDP) ---\n")
-         f.write(f"  Triplet {top_3_features}: {h_3way:.4f}\n\n")
+        f.write("--- Approx. 3-Way Interaction (Std Dev of 3D PDP) ---\n")
+        f.write(f"  Triplet {top_3_features}: {h_3way:.4f}\n\n")
 
-print(f"Saved summary findings to: {summary_filename}")
+    # Add Linear Model Results if they exist
+    if 'rmse_orig' in locals():
+        f.write("--- Linear Model Comparison ---\n")
+        if 'actual_eng_features' in locals():
+            f.write(f"Engineered Features Added: {actual_eng_features}\n")
+        f.write(f"Linear Model (Original): Test RMSE={rmse_orig:.4f}, R2={r2_orig:.4f}\n")
+        if 'rmse_eng' in locals():
+            f.write(f"Linear Model (Enginrd.): Test RMSE={rmse_eng:.4f}, R2={r2_eng:.4f}\n")
+        f.write("\n")
+
+    # Add RuleFit Rules to detailed summary
+    if rulefit_rules_df is not None and not rulefit_rules_df.empty:
+         f.write(f"--- Top RuleFit Rules by Importance ---\n")
+         f.write(rulefit_rules_df[['rule', 'coef', 'support', 'importance']].to_string(index=False))
+         f.write("\n\n")
+
+    # Add Condition-Only Linear Model Results
+    if 'condition_linear_results' in locals() and condition_linear_results is not None:
+        f.write("--- Linear Models Using ONLY Condition Features ---\n")
+        f.write(f"Linear Regression: Test RMSE={condition_linear_results['linear']['rmse']:.4f}, R2={condition_linear_results['linear']['r2']:.4f}\n")
+        f.write(f"RidgeCV Regression: Test RMSE={condition_linear_results['ridge']['rmse']:.4f}, R2={condition_linear_results['ridge']['r2']:.4f}, Alpha={condition_linear_results['ridge']['alpha']:.4f}\n")
+        f.write(f"LassoCV Regression: Test RMSE={condition_linear_results['lasso']['rmse']:.4f}, R2={condition_linear_results['lasso']['r2']:.4f}, Alpha={condition_linear_results['lasso']['alpha']:.4f}\n\n")
+
+        # Write Ridge Coefficients
+        f.write("Top Ridge Coefficients (Conditions Only):\n")
+        ridge_df_sum = pd.DataFrame(condition_linear_results['ridge']['coefficients'])
+        f.write(ridge_df_sum[['Original_Condition', 'Ridge_Coefficient']].head(15).to_string(index=False, float_format="%.4f"))
+        f.write("\n\n")
+
+        # Write Lasso Coefficients
+        f.write("Top Lasso Coefficients (Conditions Only):\n")
+        lasso_df_sum = pd.DataFrame(condition_linear_results['lasso']['coefficients'])
+        lasso_zeros = lasso_df_sum['Is_Zero'].sum()
+        f.write(lasso_df_sum[['Original_Condition', 'Lasso_Coefficient', 'Is_Zero']].head(20).to_string(index=False, float_format="%.4f"))
+        f.write(f"\n(Number of Lasso coefficients shrunk to zero: {lasso_zeros})\n\n")
+    else:
+        f.write("--- Linear Models Using ONLY Condition Features ---\n")
+        f.write("(Not calculated, likely no condition features were generated)\n\n")
+
+print(f"Saved detailed findings to: {summary_filename}")
 
 # --- 11. Summary Visualisations ---
 print("\n--- 11. Summary Visualizations ---")
@@ -992,7 +2050,7 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and not condition_importance_df.empty
                 new_feat_name = f"{feature}_{op}_{neg_prefix}{thresh_str}"
 
                 if new_feat_name in engineered_features_train_df.columns:
-                     continue # Avoid duplicates
+                     continue
 
                 if op == 'le':
                      engineered_features_train_df[new_feat_name] = (X_train[feature] <= threshold).astype(int)
@@ -1113,5 +2171,199 @@ if 'X_train_eng' in locals() and 'X_test_eng' in locals():
     except Exception as e:
         print(f"Error during Linear Model training or evaluation: {e}")
 
+print("\n--- Generating Summary Report & Saving Results ---")
+report_generator.add_limitations_section()
+report_markdown = report_generator.generate_report(output_path=os.path.join(OUTPUT_DIR, "analysis_summary_report.md"))
+report_generator.save_analysis_results(output_path=os.path.join(OUTPUT_DIR, "analysis_results.json"))
+
 print("\n--- Workflow Complete ---")
-print(f"All outputs saved in directory: {OUTPUT_DIR}") 
+print(f"All outputs saved in directory: {OUTPUT_DIR}")
+
+# --- Re-enabled: Generate Plotly 3D PDP plots ---
+print("\nAttempting to generate Plotly 3D PDP plots...")
+
+# --- MODIFIED: Select pairs based on top N features --- 
+pairs_for_plotly_pdp = []
+if not combined_imp.empty and len(features) >= 2:
+    top_n_pdp_features = combined_imp.head(N_TOP_FEATURES_FOR_PDP_3D).index.tolist()
+    if len(top_n_pdp_features) >= 2:
+        pairs_for_plotly_pdp = list(combinations(top_n_pdp_features, 2))
+        print(f"Generating Plotly 3D PDPs for top {N_TOP_FEATURES_FOR_PDP_3D} feature pairs ({len(pairs_for_plotly_pdp)} pairs): {top_n_pdp_features}")
+    else:
+         print(f"Need at least 2 top features for Plotly PDP plots, found {len(top_n_pdp_features)}.")
+elif combined_imp.empty:
+    print("Combined importance is empty, cannot determine top features for Plotly PDP plots.")
+elif len(features) < 2:
+     print("Need at least 2 features in the dataset for Plotly PDP plots.")
+
+if pairs_for_plotly_pdp: # Only proceed if pairs were generated
+    # Plot for the selected pairs
+    for pair in pairs_for_plotly_pdp: # Iterate through defined pairs
+        if isinstance(pair, tuple) and len(pair) == 2:
+            f1, f2 = pair
+            print(f"\nCalculating PDP for Plotly 3D plot: ({f1}, {f2})")
+            try:
+                feature_names_pdp = X_train.columns.tolist()
+                # Find indices safely
+                if f1 not in feature_names_pdp or f2 not in feature_names_pdp:
+                     print(f"  Skipping pair ({f1}, {f2}), feature not found in X_train columns.")
+                     continue
+                f1_idx = feature_names_pdp.index(f1)
+                f2_idx = feature_names_pdp.index(f2)
+
+                pdp_results = partial_dependence(
+                    surrogate_model,
+                    X_train,
+                    features=[(f1_idx, f2_idx)], # Use indices
+                    kind='average',
+                    grid_resolution=20
+                )
+
+                # --- Access results using correct keys --- 
+                print("Accessing PDP results...")
+                # Ensure results are structured as expected
+                if 'average' in pdp_results and len(pdp_results['average']) > 0 and \
+                   'grid_values' in pdp_results and len(pdp_results['grid_values']) == 2:
+                    pdp_values = pdp_results['average'][0]
+                    grid_f1 = pdp_results['grid_values'][0]
+                    grid_f2 = pdp_results['grid_values'][1]
+                else:
+                     print(f"  Error: Unexpected structure in partial_dependence results for ({f1}, {f2}). Skipping plot.")
+                     continue
+                # --- End Access --- 
+
+                # --- Create Plotly 3D Plot --- 
+                print("Creating Plotly 3D Surface plot...")
+                fig_plotly_pdp3d = go.Figure(data=[go.Surface(z=pdp_values, x=grid_f1, y=grid_f2, colorscale='Viridis')])
+                fig_plotly_pdp3d.update_layout(title=f'Plotly 3D PDP: {f1} vs {f2}',
+                                      scene = dict(xaxis_title=f1, yaxis_title=f2, zaxis_title='Partial Dependence'),
+                                      autosize=True, margin=dict(l=65, r=50, b=65, t=90))
+                save_plot(fig_plotly_pdp3d, f"plotly_pdp_3d_{f1}_{f2}", OUTPUT_DIR)
+                # --- End Plotting --- 
+
+            except Exception as e:
+                print(f"Error generating Plotly 3D PDP plot for ({f1}, {f2}): {e}")
+        else:
+             print(f"Skipping Plotly 3D PDP for invalid pair: {pair}")
+else:
+    print("No feature pairs selected for Plotly 3D PDP plots based on top features.")
+# --- END MODIFICATION --- 
+
+
+# --- 8. Causality Analysis (Granger Feature -> Target) ---
+print("\n--- 8. Causality Analysis (Granger Feature -> Target) ---")
+# ... (Stationarity Check code remains the same) ...
+
+print("\nRunning Granger Causality Tests (Feature -> Target)...")
+GRANGER_MAX_LAG = 3 # Define max lag for tests
+
+# Call should now match definition (no target_name arg)
+granger_p_values = perform_granger_causality(X_train, y_train, features, GRANGER_MAX_LAG)
+
+if granger_p_values is not None and not granger_p_values.isnull().all():
+    # Visualize p-values with a bar chart
+    granger_plot_data = granger_p_values.reset_index()
+    granger_plot_data.columns = ['Feature', 'P_Value']
+    # Sort for better visualization
+    granger_plot_data = granger_plot_data.sort_values('P_Value')
+
+    fig_granger = px.bar(granger_plot_data, x='Feature', y='P_Value',
+                         title=f'Granger Causality (Feature -> {TARGET_VARIABLE}) P-Values (Lag {GRANGER_MAX_LAG})',
+                         labels={'P_Value': 'P-Value (Lower suggests causality)'})
+    # Add significance line
+    fig_granger.add_hline(y=0.05, line_dash="dash", line_color="red", annotation_text="p=0.05")
+    fig_granger.update_layout(yaxis_range=[0, max(0.1, granger_plot_data['P_Value'].max()*1.1)]) # Adjust y-axis focus
+    save_plot(fig_granger, "causality_granger_bar", OUTPUT_DIR) # Changed filename
+    print("Saved Granger Causality bar chart.")
+
+    # Add to report
+    report_generator.add_granger_causality_summary(granger_p_values, GRANGER_MAX_LAG)
+else:
+    print("Granger Causality analysis failed or yielded no results. Skipping chart and report section.")
+    report_generator.add_section("8b. Causality Analysis (Granger Feature -> Target)", "Granger causality tests could not be completed.")
+
+# --- 6c. Rule Extraction with imodels (RuleFit) ---
+print("\n--- 6c. Rule Extraction with imodels (RuleFit) ---")
+# rulefit_rules_df = None # Initialized earlier
+try:
+    print("Training RuleFitRegressor model...")
+    # Initialize and fit RuleFitRegressor
+    # Consider adjusting hyperparameters like max_rules, tree_size, etc.
+    rulefit = RuleFitRegressor(random_state=42)
+    rulefit.fit(X_train.values, y_train, feature_names=features) # RuleFit often prefers numpy arrays
+
+    print("Extracting rules from RuleFit...")
+    # --- FIX: Use .rules_ attribute instead of .get_rules() ---
+    rules_ = rulefit.rules_
+    # --- END FIX ---
+    # --- ADDED: Print structure for debugging ---
+    print(f"RuleFit raw rules_ structure (first 5): {rules_[:5]}") 
+    # --- END ADDED ---
+    # --- FIX: Check list emptiness correctly and convert to DataFrame ---
+    if rules_ is None or not rules_: # Check if list is None or empty
+         print("RuleFit model did not generate any rules.")
+         rulefit_rules_df = None
+    else:
+        rulefit_rules_df = pd.DataFrame(rules_) # Convert list of dicts to DataFrame
+        # --- END FIX ---
+        # Filter out rules with zero coefficient (linear terms are handled separately if needed)
+        # Ensure DataFrame is not empty after conversion before filtering
+        if not rulefit_rules_df.empty:
+            # --- Temporarily Commented Out for Debugging --- 
+            # # --- FIX: Check if 'type' column exists before filtering --- 
+            # if 'type' in rulefit_rules_df.columns:
+            #     rulefit_rules_df = rulefit_rules_df[rulefit_rules_df['type'] == 'rule'].copy() # Ensure we copy
+            # else:
+            #     print("Warning: 'type' column not found in RuleFit rules. Skipping filtering by type.")
+            # # --- END FIX ---
+            # # Filter by non-zero coefficient
+            # if 'coef' in rulefit_rules_df.columns:
+            #     rulefit_rules_df = rulefit_rules_df[rulefit_rules_df['coef'] != 0].copy()
+            # else:
+            #      print("Warning: 'coef' column not found in RuleFit rules. Cannot filter by coefficient.")
+            #      rulefit_rules_df = pd.DataFrame() # Make empty if coef missing
+            pass # Keep indentation correct
+            # --- End Temporarily Commented Out --- 
+        else:
+             print("RuleFit generated rules but DataFrame conversion or initial rules were empty.")
+             rulefit_rules_df = pd.DataFrame() # Ensure it's an empty DF
+
+    # --- Temporarily Commented Out for Debugging ---
+    # if rulefit_rules_df is not None and not rulefit_rules_df.empty:
+    #     # Sort rules by absolute coefficient magnitude
+    #     # --- Need to confirm 'coef' column name based on debug output --- 
+    #     # if 'coef' in rulefit_rules_df.columns: 
+    #     #     rulefit_rules_df['importance'] = rulefit_rules_df['coef'].abs()
+    #     #     rulefit_rules_df = rulefit_rules_df.sort_values('importance', ascending=False)
+    # 
+    #     #     print("\nTop 10 Rules from RuleFitRegressor:")
+    #     #     print(rulefit_rules_df[['rule', 'coef', 'support']].head(10))
+    #     # 
+    #     #     # Visualize top rule importances
+    #     #     plot_df = rulefit_rules_df.head(20).sort_values('importance', ascending=True)
+    #     #     fig_rulefit = px.bar(plot_df,
+    #     #                          x='coef', y='rule', orientation='h',
+    #     #                          title='Top 20 RuleFit Rule Importances (Coefficient Magnitude)',
+    #     #                          labels={'coef': 'Coefficient (Importance)', 'rule': 'Rule'},
+    #     #                          color='coef',
+    #     #                          color_continuous_scale=px.colors.diverging.Picnic)
+    #     #     fig_rulefit.update_layout(yaxis={'tickmode': 'array', 'tickvals': list(range(len(plot_df))), 'ticktext': plot_df['rule'].tolist()})
+    #     #     save_plot(fig_rulefit, "rulefit_rule_importance", OUTPUT_DIR)
+    #     # else:
+    #     #     print("Cannot sort/plot RuleFit importance, 'coef' column missing.")
+    # 
+    #     # Add summary to report
+    #     report_generator.add_rulefit_summary(rulefit_rules_df)
+    # else:
+    #     print("RuleFitRegressor did not generate any rules with non-zero coefficients or analysis failed.")
+    #     report_generator.add_rulefit_summary(None) # Add section indicating no rules
+    # --- End Temporarily Commented Out --- 
+
+except ImportError:
+    print("imodels library not found (pip install imodels). Skipping RuleFit analysis.")
+    report_generator.add_rulefit_summary(None)
+except Exception as e:
+    print(f"Error during RuleFit analysis: {e}")
+    report_generator.add_rulefit_summary(None)
+
+# ... (Rest of script) ...
