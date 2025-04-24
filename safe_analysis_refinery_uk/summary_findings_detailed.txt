@@ -1,0 +1,265 @@
+--- Summary of Key Findings ---
+
+--- Feature Importance Rankings (Full Lists) ---
+
+Importance Scores:
+                                 Permutation_Train  SHAP_Train       MDI  Permutation_Train_rank  SHAP_Train_rank  MDI_rank  mean_rank
+feature                                                                                                                               
+x50_50_hls_lls_cracking_usgc              0.472048   84.375637  0.237326                     1.0              1.0       1.0   1.000000
+urals_cracking_med                        0.287245   53.779276  0.224058                     2.0              2.0       2.0   2.000000
+wti                                       0.214476   50.429261  0.214079                     3.0              3.0       3.0   3.000000
+urals_hydroskimming_med                   0.078181   20.566321  0.072982                     4.0              4.0       4.0   4.000000
+dubai_cracking_singapore                  0.043030    9.379896  0.043513                     5.0              6.0       5.0   5.333333
+brent_cracking_nw_europe                  0.029690    7.731283  0.038765                     6.0              7.0       6.0   6.333333
+urals_cracking_nw_europe                  0.018157    9.615247  0.035675                     9.0              5.0       7.0   7.000000
+es_sider_cracking_med                     0.019791    7.362051  0.023988                     8.0              8.0       8.0   8.000000
+tapis_hydroskimming_singapore             0.021607    7.298589  0.023571                     7.0              9.0       9.0   8.333333
+bakken_coking_usmc                        0.008908    3.131370  0.013646                    10.0             12.0      10.0  10.666667
+dubai_hydroskimming_singapore             0.007577    2.820223  0.012980                    11.0             13.0      11.0  11.666667
+dubai                                     0.006711    3.507549  0.010547                    13.0             10.0      13.0  12.000000
+x30_70_wcs_bakken_cracking_usmc           0.006535    2.183705  0.012560                    14.0             14.0      12.0  13.333333
+es_sider_hydroskimming_med                0.005934    3.308547  0.010396                    15.0             11.0      14.0  13.333333
+brent_hydroskimming_nw_europe             0.007311    2.167723  0.009764                    12.0             15.0      15.0  14.000000
+brent                                     0.005600    1.812137  0.008697                    16.0             16.0      16.0  16.000000
+urals_hydroskimming_nw_europe             0.003342    1.692746  0.007450                    17.0             17.0      17.0  17.000000
+
+Importance Ranks (Lower is better):
+                                 mean_rank  Permutation_Train_rank  SHAP_Train_rank  MDI_rank  mean_rank
+feature                                                                                                 
+x50_50_hls_lls_cracking_usgc      1.000000                     1.0              1.0       1.0   1.000000
+urals_cracking_med                2.000000                     2.0              2.0       2.0   2.000000
+wti                               3.000000                     3.0              3.0       3.0   3.000000
+urals_hydroskimming_med           4.000000                     4.0              4.0       4.0   4.000000
+dubai_cracking_singapore          5.333333                     5.0              6.0       5.0   5.333333
+brent_cracking_nw_europe          6.333333                     6.0              7.0       6.0   6.333333
+urals_cracking_nw_europe          7.000000                     9.0              5.0       7.0   7.000000
+es_sider_cracking_med             8.000000                     8.0              8.0       8.0   8.000000
+tapis_hydroskimming_singapore     8.333333                     7.0              9.0       9.0   8.333333
+bakken_coking_usmc               10.666667                    10.0             12.0      10.0  10.666667
+dubai_hydroskimming_singapore    11.666667                    11.0             13.0      11.0  11.666667
+dubai                            12.000000                    13.0             10.0      13.0  12.000000
+x30_70_wcs_bakken_cracking_usmc  13.333333                    14.0             14.0      12.0  13.333333
+es_sider_hydroskimming_med       13.333333                    15.0             11.0      14.0  13.333333
+brent_hydroskimming_nw_europe    14.000000                    12.0             15.0      15.0  14.000000
+brent                            16.000000                    16.0             16.0      16.0  16.000000
+urals_hydroskimming_nw_europe    17.000000                    17.0             17.0      17.0  17.000000
+
+--- Top 20 Rule Conditions by Importance (Permutation) ---
+                      Original_Condition  Importance
+ (x50_50_hls_lls_cracking_usgc, > 0.620)    0.017051
+ (x50_50_hls_lls_cracking_usgc, <=0.245)    0.014691
+ (x50_50_hls_lls_cracking_usgc, <=0.620)    0.013306
+ (x50_50_hls_lls_cracking_usgc, > 0.245)    0.013102
+           (urals_cracking_med, > 9.455)    0.011857
+(x50_50_hls_lls_cracking_usgc, > -0.085)    0.010527
+     (urals_hydroskimming_med, <=-4.360)    0.009829
+ (x50_50_hls_lls_cracking_usgc, > 0.195)    0.007047
+ (x50_50_hls_lls_cracking_usgc, <=0.195)    0.005297
+     (brent_cracking_nw_europe, <=4.235)    0.005249
+     (dubai_cracking_singapore, <=2.095)    0.004909
+     (urals_hydroskimming_med, > -4.360)    0.004028
+           (urals_cracking_med, <=9.455)    0.003900
+(x50_50_hls_lls_cracking_usgc, <=-0.085)    0.003312
+     (dubai_cracking_singapore, > 2.095)    0.003111
+           (urals_cracking_med, > 6.620)    0.001856
+     (brent_cracking_nw_europe, > 4.235)    0.001768
+                       (dubai, > 60.550)    0.000962
+           (urals_cracking_med, <=6.620)    0.000936
+                       (dubai, <=60.550)    0.000336
+
+--- Top Feature Interactions (Approx. H-statistic) ---
+urals_cracking_med               x50_50_hls_lls_cracking_usgc       0.075148
+wti                              dubai_cracking_singapore           0.055514
+                                 urals_hydroskimming_med            0.039961
+tapis_hydroskimming_singapore    wti                                0.029836
+x50_50_hls_lls_cracking_usgc     urals_hydroskimming_med            0.025352
+tapis_hydroskimming_singapore    urals_hydroskimming_med            0.024410
+brent_cracking_nw_europe         wti                                0.015106
+x50_50_hls_lls_cracking_usgc     wti                                0.014208
+brent_cracking_nw_europe         urals_hydroskimming_med            0.010593
+x50_50_hls_lls_cracking_usgc     es_sider_cracking_med              0.010167
+urals_hydroskimming_nw_europe    tapis_hydroskimming_singapore      0.009954
+tapis_hydroskimming_singapore    urals_cracking_nw_europe           0.009457
+x30_70_wcs_bakken_cracking_usmc  brent                              0.008357
+dubai_cracking_singapore         x50_50_hls_lls_cracking_usgc       0.007539
+es_sider_cracking_med            dubai_hydroskimming_singapore      0.007462
+wti                              urals_cracking_nw_europe           0.007192
+dubai                            brent                              0.005472
+bakken_coking_usmc               dubai                              0.005381
+urals_hydroskimming_med          urals_cracking_nw_europe           0.005313
+wti                              bakken_coking_usmc                 0.005055
+urals_cracking_med               urals_hydroskimming_med            0.004962
+brent_hydroskimming_nw_europe    dubai                              0.004930
+brent_cracking_nw_europe         brent                              0.004502
+bakken_coking_usmc               es_sider_cracking_med              0.003883
+urals_cracking_med               wti                                0.003464
+x50_50_hls_lls_cracking_usgc     urals_cracking_nw_europe           0.003416
+bakken_coking_usmc               urals_hydroskimming_nw_europe      0.003398
+urals_hydroskimming_nw_europe    brent_cracking_nw_europe           0.003377
+x50_50_hls_lls_cracking_usgc     brent_cracking_nw_europe           0.003315
+es_sider_cracking_med            wti                                0.003309
+                                 dubai                              0.003157
+dubai                            x30_70_wcs_bakken_cracking_usmc    0.003041
+brent_cracking_nw_europe         x30_70_wcs_bakken_cracking_usmc    0.003024
+bakken_coking_usmc               dubai_cracking_singapore           0.002975
+dubai_hydroskimming_singapore    x30_70_wcs_bakken_cracking_usmc    0.002904
+brent_cracking_nw_europe         es_sider_cracking_med              0.002668
+brent                            dubai_hydroskimming_singapore      0.002283
+tapis_hydroskimming_singapore    x30_70_wcs_bakken_cracking_usmc    0.002205
+                                 bakken_coking_usmc                 0.002204
+urals_cracking_nw_europe         brent_cracking_nw_europe           0.002179
+tapis_hydroskimming_singapore    dubai_cracking_singapore           0.002164
+urals_cracking_nw_europe         dubai_hydroskimming_singapore      0.002158
+dubai_hydroskimming_singapore    urals_cracking_med                 0.002152
+dubai                            dubai_cracking_singapore           0.002111
+urals_hydroskimming_nw_europe    brent_hydroskimming_nw_europe      0.002040
+brent_hydroskimming_nw_europe    tapis_hydroskimming_singapore      0.002000
+bakken_coking_usmc               dubai_hydroskimming_singapore      0.001992
+                                 brent                              0.001968
+es_sider_cracking_med            x30_70_wcs_bakken_cracking_usmc    0.001762
+dubai                            dubai_hydroskimming_singapore      0.001607
+urals_cracking_nw_europe         urals_hydroskimming_nw_europe      0.001605
+brent_hydroskimming_nw_europe    brent_cracking_nw_europe           0.001471
+urals_cracking_med               dubai_cracking_singapore           0.001464
+es_sider_hydroskimming_med       bakken_coking_usmc                 0.001459
+x30_70_wcs_bakken_cracking_usmc  urals_cracking_nw_europe           0.001455
+es_sider_hydroskimming_med       tapis_hydroskimming_singapore      0.001448
+urals_cracking_med               brent_cracking_nw_europe           0.001394
+urals_hydroskimming_nw_europe    es_sider_hydroskimming_med         0.001360
+brent_hydroskimming_nw_europe    es_sider_hydroskimming_med         0.001353
+                                 brent                              0.001332
+dubai                            urals_hydroskimming_nw_europe      0.001331
+dubai_hydroskimming_singapore    brent_cracking_nw_europe           0.001288
+brent_hydroskimming_nw_europe    x30_70_wcs_bakken_cracking_usmc    0.001237
+es_sider_hydroskimming_med       dubai_hydroskimming_singapore      0.001215
+tapis_hydroskimming_singapore    dubai_hydroskimming_singapore      0.001095
+urals_hydroskimming_med          brent_hydroskimming_nw_europe      0.001067
+brent_cracking_nw_europe         tapis_hydroskimming_singapore      0.001048
+urals_hydroskimming_med          es_sider_cracking_med              0.001019
+dubai                            es_sider_hydroskimming_med         0.001009
+tapis_hydroskimming_singapore    brent                              0.000972
+brent_hydroskimming_nw_europe    urals_cracking_med                 0.000961
+es_sider_hydroskimming_med       es_sider_cracking_med              0.000897
+tapis_hydroskimming_singapore    es_sider_cracking_med              0.000896
+wti                              x30_70_wcs_bakken_cracking_usmc    0.000845
+urals_hydroskimming_med          es_sider_hydroskimming_med         0.000794
+                                 urals_hydroskimming_nw_europe      0.000782
+brent_cracking_nw_europe         es_sider_hydroskimming_med         0.000766
+dubai                            tapis_hydroskimming_singapore      0.000711
+urals_cracking_med               es_sider_cracking_med              0.000706
+urals_cracking_nw_europe         urals_cracking_med                 0.000689
+dubai_hydroskimming_singapore    brent_hydroskimming_nw_europe      0.000684
+bakken_coking_usmc               brent_cracking_nw_europe           0.000676
+urals_cracking_nw_europe         brent_hydroskimming_nw_europe      0.000665
+bakken_coking_usmc               x30_70_wcs_bakken_cracking_usmc    0.000650
+                                 x50_50_hls_lls_cracking_usgc       0.000624
+urals_cracking_med               es_sider_hydroskimming_med         0.000603
+es_sider_cracking_med            urals_hydroskimming_nw_europe      0.000596
+x50_50_hls_lls_cracking_usgc     tapis_hydroskimming_singapore      0.000586
+wti                              dubai                              0.000580
+es_sider_cracking_med            brent_hydroskimming_nw_europe      0.000579
+brent_cracking_nw_europe         dubai                              0.000576
+x30_70_wcs_bakken_cracking_usmc  dubai_cracking_singapore           0.000556
+x50_50_hls_lls_cracking_usgc     dubai_hydroskimming_singapore      0.000538
+brent_hydroskimming_nw_europe    wti                                0.000513
+x30_70_wcs_bakken_cracking_usmc  urals_hydroskimming_nw_europe      0.000501
+es_sider_cracking_med            urals_cracking_nw_europe           0.000495
+wti                              dubai_hydroskimming_singapore      0.000491
+urals_hydroskimming_med          dubai_hydroskimming_singapore      0.000489
+brent                            dubai_cracking_singapore           0.000480
+x50_50_hls_lls_cracking_usgc     brent_hydroskimming_nw_europe      0.000455
+urals_hydroskimming_nw_europe    brent                              0.000431
+x30_70_wcs_bakken_cracking_usmc  es_sider_hydroskimming_med         0.000423
+brent                            es_sider_hydroskimming_med         0.000415
+urals_cracking_med               tapis_hydroskimming_singapore      0.000412
+dubai                            urals_hydroskimming_med            0.000390
+brent                            es_sider_cracking_med              0.000378
+es_sider_hydroskimming_med       wti                                0.000374
+urals_hydroskimming_nw_europe    wti                                0.000366
+urals_cracking_nw_europe         dubai_cracking_singapore           0.000361
+x50_50_hls_lls_cracking_usgc     brent                              0.000357
+es_sider_hydroskimming_med       urals_cracking_nw_europe           0.000354
+dubai                            x50_50_hls_lls_cracking_usgc       0.000341
+es_sider_hydroskimming_med       dubai_cracking_singapore           0.000335
+es_sider_cracking_med            dubai_cracking_singapore           0.000324
+dubai                            urals_cracking_nw_europe           0.000296
+wti                              brent                              0.000262
+bakken_coking_usmc               brent_hydroskimming_nw_europe      0.000222
+dubai_cracking_singapore         brent_cracking_nw_europe           0.000190
+bakken_coking_usmc               urals_cracking_nw_europe           0.000184
+es_sider_hydroskimming_med       x50_50_hls_lls_cracking_usgc       0.000162
+urals_cracking_med               bakken_coking_usmc                 0.000131
+brent                            urals_cracking_med                 0.000130
+urals_cracking_med               dubai                              0.000128
+bakken_coking_usmc               urals_hydroskimming_med            0.000117
+brent                            urals_cracking_nw_europe           0.000109
+x30_70_wcs_bakken_cracking_usmc  x50_50_hls_lls_cracking_usgc       0.000098
+dubai_cracking_singapore         dubai_hydroskimming_singapore      0.000093
+dubai_hydroskimming_singapore    urals_hydroskimming_nw_europe      0.000088
+x30_70_wcs_bakken_cracking_usmc  urals_cracking_med                 0.000080
+urals_hydroskimming_nw_europe    x50_50_hls_lls_cracking_usgc       0.000077
+urals_hydroskimming_med          dubai_cracking_singapore           0.000074
+x30_70_wcs_bakken_cracking_usmc  urals_hydroskimming_med            0.000063
+dubai_cracking_singapore         urals_hydroskimming_nw_europe      0.000056
+urals_hydroskimming_nw_europe    urals_cracking_med                 0.000044
+dubai_cracking_singapore         brent_hydroskimming_nw_europe      0.000028
+brent                            urals_hydroskimming_med            0.000028
+
+--- Interaction Stability (Mean +/- Std Dev H-statistic across Bootstraps) ---
+  urals_cracking_med__x50_50_hls_lls_cracking_usgc: 0.076 +/- 0.009
+  wti__dubai_cracking_singapore: 0.058 +/- 0.009
+  wti__urals_hydroskimming_med: 0.066 +/- 0.022
+
+--- Linear Models Using ONLY Condition Features ---
+Linear Regression: Test RMSE=283.3138, R2=-5.2301
+RidgeCV Regression: Test RMSE=265.3347, R2=-4.4645, Alpha=5.3367
+LassoCV Regression: Test RMSE=277.0877, R2=-4.9593, Alpha=0.3598
+
+Top Ridge Coefficients (Conditions Only):
+                      Original_Condition  Ridge_Coefficient
+     (urals_hydroskimming_med, > -4.360)           101.9718
+     (urals_hydroskimming_med, <=-4.360)          -101.9718
+           (urals_cracking_med, <=9.455)           -91.6484
+           (urals_cracking_med, > 9.455)            91.6484
+           (urals_cracking_med, > 6.620)            63.5565
+           (urals_cracking_med, <=6.620)           -63.5565
+(x50_50_hls_lls_cracking_usgc, <=-0.085)            52.2380
+(x50_50_hls_lls_cracking_usgc, > -0.085)           -52.2380
+ (x50_50_hls_lls_cracking_usgc, > 0.620)           -48.6141
+ (x50_50_hls_lls_cracking_usgc, <=0.620)            48.6141
+     (dubai_cracking_singapore, > 2.095)            42.0016
+     (dubai_cracking_singapore, <=2.095)           -42.0016
+                       (dubai, > 60.550)            31.1256
+                       (dubai, <=60.550)           -31.1256
+ (x50_50_hls_lls_cracking_usgc, > 0.195)           -23.3996
+
+Top Lasso Coefficients (Conditions Only):
+                      Original_Condition  Lasso_Coefficient  Is_Zero
+     (urals_hydroskimming_med, <=-4.360)          -246.0307    False
+           (urals_cracking_med, <=9.455)          -208.3019    False
+(x50_50_hls_lls_cracking_usgc, <=-0.085)           145.7239    False
+ (x50_50_hls_lls_cracking_usgc, <=0.620)           138.1302    False
+           (urals_cracking_med, <=6.620)          -130.2590    False
+     (dubai_cracking_singapore, <=2.095)           -98.1498    False
+                       (dubai, <=60.550)           -64.3471    False
+     (brent_cracking_nw_europe, <=4.235)            54.7010    False
+     (urals_hydroskimming_med, > -4.360)             0.0000     True
+                       (dubai, > 60.550)             0.0000     True
+     (dubai_cracking_singapore, > 2.095)             0.0000     True
+           (urals_cracking_med, > 6.620)             0.0000     True
+(x50_50_hls_lls_cracking_usgc, > -0.085)            -0.0000     True
+ (x50_50_hls_lls_cracking_usgc, <=0.245)            -0.0000     True
+ (x50_50_hls_lls_cracking_usgc, <=0.195)             0.0000     True
+ (x50_50_hls_lls_cracking_usgc, > 0.620)            -0.0000     True
+ (x50_50_hls_lls_cracking_usgc, > 0.195)            -0.0000     True
+           (urals_cracking_med, > 9.455)             0.0000     True
+     (brent_cracking_nw_europe, > 4.235)            -0.0000     True
+ (x50_50_hls_lls_cracking_usgc, > 0.245)             0.0000     True
+(Number of Lasso coefficients shrunk to zero: 12)
+
+
+
+--- Linear Model Comparison ---
+Engineered Features Added: ['x50_50_hls_lls_cracking_usgc_gt_0p62', 'x50_50_hls_lls_cracking_usgc_le_0p24', 'x50_50_hls_lls_cracking_usgc_le_0p62', 'x50_50_hls_lls_cracking_usgc_gt_0p24', 'urals_cracking_med_x_x50_50_hls_lls_cracking_usgc', 'wti_x_dubai_cracking_singapore']
+Linear Model (Original): Test RMSE=124.0109, R2=-0.1937
+Linear Model (Enginrd.): Test RMSE=145.8070, R2=-0.6501

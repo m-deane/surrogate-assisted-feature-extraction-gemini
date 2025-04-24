@@ -66,6 +66,7 @@ Key parameters can be configured directly at the top of the `safe_analysis.py` s
 *   `TARGET_VARIABLE`: Name of the target column in the data.
 *   `DATE_COLUMN`: Name of the date/time column for time series indexing.
 *   `GROUPING_COLUMN`, `FILTER_VALUE`: Optional parameters to filter the dataset before analysis.
+*   `FEATURES_TO_INCLUDE`: Controls which features are used. Default is `"all"` (uses all numeric features except the target). Can be set to a list of column names (e.g., `["feature1", "feature3"]`) to use only those specific features.
 *   `TEST_MONTHS`: Number of months to use for the time series test split.
 *   `SURROGATE_MODEL_TYPE`: Choose between `'random_forest'` or `'xgboost'`.
 *   `N_TOP_FEATURES_FOR_PDP_3D`: Limits the generation of computationally intensive Plotly 3D PDP plots to pairs formed from these top features.

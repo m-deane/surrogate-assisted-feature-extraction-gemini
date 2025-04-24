@@ -371,6 +371,66 @@ surrogate model trained on the data.
         if p_value_series is not None:
             self.results_dict['granger_causality_feature_to_target_p_values'] = p_value_series
 
+    def add_granger_causality_condition_summary(self, p_value_series, max_lag):
+        """Adds Granger causality (condition feature -> target) summary to the report."""
+        content = f"Pairwise Granger causality tests performed for each *condition-derived* feature predicting the target variable, up to lag {max_lag}. "
+        content += "Lower p-values suggest a condition feature Granger-causes the target (helps predict its future values).\\n\\n"
+        content += "See the bar chart plot (`causality_granger_condition_bar.png/.html`) for details.\\n"
+        content += "Note: Granger causality checks for predictive power, not necessarily true causation, and assumes stationarity.\\n"
+        self.add_section("8c. Causality Analysis (Granger Condition Feature -> Target)", content)
+        # Store the series itself in results
+        if p_value_series is not None:
+            self.results_dict['granger_causality_condition_to_target_p_values'] = p_value_series
+
+    def add_lofo_condition_summary(self, lofo_df):
+        """Adds summary of LOFO importance for condition features."""
+        content = "LOFO importance calculated for condition-derived features using the secondary model.\\n"
+        content += "Higher positive scores indicate greater importance.\\n\\n"
+        content += "See the bar chart plot (`featimp_lofo_condition.png`) for details.\\n"
+
+        if lofo_df is not None and not lofo_df.empty:
+            # Assume 'feature' and 'importance_mean' columns exist after processing
+            # Sort and select top 5
+            top_lofo_cond = lofo_df.sort_values('importance_mean', ascending=False).head(5)
+            content += "**Top 5 Condition Features by LOFO Importance:**\\n"
+            for idx, row in top_lofo_cond.iterrows():
+                # Try to map back to original condition if available
+                original_cond_str = f" (`{row.get('Original_Condition', 'N/A')}`)" if 'Original_Condition' in row and pd.notna(row['Original_Condition']) else ""
+                content += f"- `{row['feature']}`: {row['importance_mean']:.4f}{original_cond_str}\\n"
+            # Store the processed top 5 DataFrame
+            self.results_dict['lofo_importance_conditions'] = top_lofo_cond
+        else:
+             content += "- (LOFO analysis for conditions not performed or yielded no results).\\n"
+             self.results_dict['lofo_importance_conditions'] = None
+
+        # Add after section 6b (Condition Importance)
+        insert_idx = -1
+        found_target = False
+        for i, sec in enumerate(self.report_sections):
+            if sec['title'].startswith("6b.") or sec['title'].startswith("4."): # Look for condition related sections
+                insert_idx = i + 1 # Insert after the last found condition section
+                found_target = True
+            elif found_target and not (sec['title'].startswith("6b.") or sec['title'].startswith("4.")):
+                 # Stop inserting after we move past condition sections
+                 break
+
+        section_title = "6b.3 LOFO Condition Importance"
+        new_section = {'title': section_title, 'content': content}
+
+        # Check if section already exists (e.g., from a previous run attempt)
+        existing_idx = -1
+        for i, sec in enumerate(self.report_sections):
+            if sec['title'] == section_title:
+                existing_idx = i
+                break
+
+        if existing_idx != -1:
+            self.report_sections[existing_idx] = new_section # Replace if exists
+        elif insert_idx != -1:
+            self.report_sections.insert(insert_idx, new_section) # Insert at found index
+        else: # Fallback add at end
+             self.add_section(section_title, content)
+
     def add_dynamic_summary(self, combined_imp, condition_importance_df, h_values, interaction_stability,
                              shap_interaction_df, granger_p_values, stationarity_results,
                              surrogate_perf, linear_perf, engineered_feature_names):
@@ -501,15 +561,19 @@ Key findings are summarized below:
     def add_rulefit_summary(self, rules_df):
         """Adds summary of top rules from RuleFitRegressor."""
         content = "RuleFitRegressor was trained to extract interpretable rules. "
+        # Removed reference to support
         content += "Rules combine feature thresholds; coefficients indicate importance.\n\n"
         content += "**Top Rules by Coefficient Magnitude:**\n"
         if rules_df is not None and not rules_df.empty:
-            # Sort by absolute coefficient for importance
-            rules_df_sorted = rules_df.iloc[rules_df['coef'].abs().sort_values(ascending=False).index]
+            # Sort by absolute coefficient for importance - use 'coefficient' column
+            rules_df_sorted = rules_df.iloc[rules_df['coefficient'].abs().sort_values(ascending=False).index]
             for i, row in rules_df_sorted.head(10).iterrows(): # Show top 10
-                content += f"- **Rule:** `{row['rule']}` (Coef: {row['coef']:.4f}, Support: {row['support']:.3f})\n"
-            # Add to results dict for JSON
-            self.results_dict['rulefit_top_rules'] = rules_df_sorted.head(10).to_dict('records')
+                # Use 'coefficient', remove 'support'
+                content += f"- **Rule:** `{row['rule']}` (Coefficient: {row['coefficient']:.4f})\n"
+            # Add to results dict for JSON - use 'coefficient'
+            # Select relevant columns before converting
+            top_rules_dict = rules_df_sorted.head(10)[['rule', 'coefficient']].to_dict('records')
+            self.results_dict['rulefit_top_rules'] = top_rules_dict
         else:
             content += "- (RuleFit analysis not performed or yielded no rules).\n"
             self.results_dict['rulefit_top_rules'] = []
@@ -548,6 +612,12 @@ Key findings are summarized below:
             # Add RuleFit rules if calculated
             if 'rulefit_rules' not in self.results_dict and 'rulefit_rules_df' in global_vars and rulefit_rules_df is not None:
                  self.results_dict['rulefit_rules'] = rulefit_rules_df
+            # Add Condition Granger results if calculated
+            if 'granger_causality_condition_to_target_p_values' not in self.results_dict and 'granger_p_values_cond' in global_vars and global_vars['granger_p_values_cond'] is not None:
+                 self.results_dict['granger_causality_condition_to_target_p_values'] = global_vars['granger_p_values_cond']
+            # Add Condition LOFO results if calculated (use the processed DataFrame)
+            if 'lofo_importance_conditions' not in self.results_dict and 'lofo_df_cond_processed' in global_vars and global_vars['lofo_df_cond_processed'] is not None:
+                 self.results_dict['lofo_importance_conditions'] = global_vars['lofo_df_cond_processed']
             # Note: Granger p_values and stationarity added by their specific methods
 
             serializable_results = self._convert_to_serializable(self.results_dict)
@@ -561,19 +631,21 @@ Key findings are summarized below:
 
 # --- End Report Generator Class ---
 
-# --- Configuration ---
-DATA_PATH = '_data/preem.csv'
-TARGET_VARIABLE = 'target'
+# --- Configuration --- 
+DATA_PATH = '_data/refinery_margins.csv' # Updated data path
+TARGET_VARIABLE = 'refinery_kbd' # Updated target variable
 DATE_COLUMN = 'date' # Assuming a 'date' column exists for time series
-GROUPING_COLUMN = 'country' # Optional: Set to None to disable filtering
-FILTER_VALUE = 'USA' # Optional: Value to filter by if GROUPING_COLUMN is set
-TEST_MONTHS = 12 # Number of months for the test set
+GROUPING_COLUMN = 'country' # Set grouping column
+FILTER_VALUE = 'United Kingdom' # Set filter value
+FEATURES_TO_INCLUDE = "all" # Use all other variables as features
+TEST_MONTHS = 12 # Use last 12 months for testing
 SURROGATE_MODEL_TYPE = 'random_forest' # 'xgboost' or 'random_forest'
 N_TREES_TO_VISUALIZE = 1
 N_TOP_FEATURES = 10 # For summaries
 N_BOOTSTRAP_SAMPLES = 10 # For interaction stability (can be slow)
 N_TOP_FEATURES_FOR_PDP_3D = 5 # Limit Plotly 3D PDPs to top N features
-OUTPUT_DIR = 'safe_analysis' # Directory to save plots
+GRANGER_MAX_LAG = 3 # Define max lag for Granger tests (Moved earlier)
+OUTPUT_DIR = 'safe_analysis_refinery_uk' # Changed output dir to avoid overwriting
 
 # Create output directory if it doesn't exist
 # Use exist_ok=True for robustness
@@ -1088,23 +1160,57 @@ if GROUPING_COLUMN and FILTER_VALUE:
 df.dropna(subset=[TARGET_VARIABLE], inplace=True)
 print(f"Dropped rows with NaN target: {df.shape[0]} rows remaining.")
 
-# Identify features (numeric only for most models here)
-features = df.select_dtypes(include=np.number).columns.tolist()
+# Identify initial potential features (numeric only for most models here)
+initial_features = df.select_dtypes(include=np.number).columns.tolist()
+if TARGET_VARIABLE in initial_features:
+    initial_features.remove(TARGET_VARIABLE)
+elif TARGET_VARIABLE not in df.columns:
+     print(f"Error: Target variable '{TARGET_VARIABLE}' not found in the DataFrame.")
+     exit()
+
+# --- ADDED: Filter features based on FEATURES_TO_INCLUDE --- 
+if isinstance(FEATURES_TO_INCLUDE, list) and FEATURES_TO_INCLUDE:
+    print(f"Filtering features based on FEATURES_TO_INCLUDE list: {FEATURES_TO_INCLUDE}")
+    # Validate specified features exist
+    features = []
+    missing_features = []
+    available_initial = initial_features + [TARGET_VARIABLE] # Include target for check
+    for feat in FEATURES_TO_INCLUDE:
+         if feat in available_initial:
+             if feat != TARGET_VARIABLE: # Don't add target to final feature list
+                 features.append(feat)
+         else:
+             missing_features.append(feat)
+    
+    if missing_features:
+         print(f"Warning: The following specified features were not found in the data (or are the target): {missing_features}")
+    if not features: # If the list is empty after filtering
+        print(f"Error: No valid features remaining after filtering by FEATURES_TO_INCLUDE. Exiting.")
+        exit()
+    print(f"Using specified features: {features}")
+elif FEATURES_TO_INCLUDE == "all" or not FEATURES_TO_INCLUDE:
+    print("Using all identified numeric features (excluding target).")
+    features = initial_features # Use all initially identified numeric features
+else:
+     print(f"Warning: Invalid value for FEATURES_TO_INCLUDE: {FEATURES_TO_INCLUDE}. Defaulting to all numeric features.")
+     features = initial_features
+# --- END ADDED --- 
+
+# Ensure target variable is definitely removed (redundant if filtering logic is correct, but safe)
 if TARGET_VARIABLE in features:
     features.remove(TARGET_VARIABLE)
-else:
-    print(f"Warning: Target variable '{TARGET_VARIABLE}' not found in numeric columns.")
-    if TARGET_VARIABLE not in df.columns:
-        print(f"Error: Target variable '{TARGET_VARIABLE}' not found in the DataFrame.")
-        exit()
 
-print(f"Identified Features ({len(features)}): {features}")
+print(f"Final Features ({len(features)}): {features}")
 print(f"Target Variable: {TARGET_VARIABLE}")
 
 # c. Time Series Split
 train_df, test_df = time_series_split_by_month(df, DATE_COLUMN, TEST_MONTHS)
 
 # Define X_train, X_test, y_train, y_test first
+# Ensure only selected features are used here
+if not all(feat in df.columns for feat in features):
+     print(f"Error: One or more selected features {features} not found in DataFrame columns before split. Exiting.")
+     exit()
 X_train, y_train = train_df[features], train_df[TARGET_VARIABLE]
 X_test, y_test = test_df[features], test_df[TARGET_VARIABLE]
 
@@ -1601,13 +1707,131 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
             condition_linear_results = None # Ensure it exists but is None
         # --- End Linear Models on Conditions ---
 
+        # --- Added: Granger Causality on Condition Features ---
+        print("\n--- 6b.2 Granger Causality on Condition Features ---")
+        granger_p_values_cond = None # Initialize
+        try:
+            if not X_train_cond_feats.empty and condition_feature_names:
+                print("Performing Stationarity Tests (ADF) on condition features...")
+                stationarity_results_cond = {}
+                for feature in condition_feature_names:
+                    try:
+                        # Condition features are binary (0/1), ADF might not be ideal,
+                        # but we run it for consistency. Results might be less meaningful.
+                        # Check for constant series first
+                        if X_train_cond_feats[feature].nunique() <= 1:
+                             print(f"  Skipping ADF for constant condition feature: {feature}")
+                             stationarity_results_cond[feature] = {'adf_stat': np.nan, 'p_value': np.nan, 'is_stationary': True, 'notes': 'Constant Series'}
+                             continue
+
+                        result_cond = adfuller(X_train_cond_feats[feature].dropna())
+                        is_stationary_cond = result_cond[1] <= 0.05
+                        stationarity_results_cond[feature] = {
+                            'adf_stat': result_cond[0], 'p_value': result_cond[1], 'is_stationary': is_stationary_cond
+                        }
+                        print(f"  {feature}: p-value={result_cond[1]:.3f} ({'Stationary' if is_stationary_cond else 'Non-Stationary'})")
+                    except Exception as adf_e:
+                        print(f"  Could not perform ADF test for condition feature {feature}: {adf_e}")
+                        stationarity_results_cond[feature] = {'error': str(adf_e)}
+                # Add to results dict (optional, could be verbose)
+                # report_generator.results_dict['stationarity_test_adf_conditions'] = stationarity_results_cond
+
+                print("\nRunning Granger Causality Tests (Condition Feature -> Target)...")
+                granger_p_values_cond = perform_granger_causality(
+                    X_train_cond_feats, y_train, condition_feature_names, GRANGER_MAX_LAG
+                )
+
+                if granger_p_values_cond is not None and not granger_p_values_cond.isnull().all():
+                    # Visualize p-values
+                    granger_cond_plot_data = granger_p_values_cond.reset_index()
+                    granger_cond_plot_data.columns = ['Condition_Feature', 'P_Value']
+                    granger_cond_plot_data = granger_cond_plot_data.sort_values('P_Value')
+
+                    fig_granger_cond = px.bar(granger_cond_plot_data, x='Condition_Feature', y='P_Value',
+                                            title=f'Granger Causality (Condition Feature -> {TARGET_VARIABLE}) P-Values (Lag {GRANGER_MAX_LAG})',
+                                            labels={'P_Value': 'P-Value (Lower suggests causality)'})
+                    fig_granger_cond.add_hline(y=0.05, line_dash="dash", line_color="red", annotation_text="p=0.05")
+                    fig_granger_cond.update_layout(yaxis_range=[0, max(0.1, granger_cond_plot_data['P_Value'].fillna(1).max()*1.1)])
+                    save_plot(fig_granger_cond, "causality_granger_condition_bar", OUTPUT_DIR)
+                    print("Saved Granger Causality (Condition Features) bar chart.")
+
+                    # Add to report
+                    report_generator.add_granger_causality_condition_summary(granger_p_values_cond, GRANGER_MAX_LAG)
+                else:
+                    print("Granger Causality (Condition Features) analysis failed or yielded no results. Skipping chart and report section.")
+                    report_generator.add_granger_causality_condition_summary(None, GRANGER_MAX_LAG) # Indicate skipped in report
+            else:
+                 print("Skipping Granger Causality on Condition Features (no valid condition features found).")
+                 report_generator.add_granger_causality_condition_summary(None, GRANGER_MAX_LAG) # Indicate skipped in report
+
+        except Exception as e:
+            print(f"Error during Granger Causality analysis for condition features: {e}")
+            report_generator.add_granger_causality_condition_summary(None, GRANGER_MAX_LAG) # Indicate skipped in report
+        # --- End Granger on Conditions ---
+
+        # --- Added: LOFO Importance on Condition Features ---
+        print("\\n--- 6b.4 LOFO Importance on Condition Features ---")
+        lofo_df_cond_raw = None
+        lofo_df_cond_processed = None
+        try:
+            if not X_train_cond_feats.empty and condition_feature_names and secondary_model is not None:
+                print("Running LOFOImportance on condition features (using secondary model)...")
+                # Create dataset with all features used by secondary_model
+                lofo_dataset_cond = Dataset(
+                    df=pd.concat([X_train_plus_cond, y_train], axis=1), # Use df with original + condition feats
+                    target=TARGET_VARIABLE,
+                    features=condition_feature_names # BUT only calculate importance for condition features
+                )
+                cv_lofo = TimeSeriesSplit(n_splits=5) # Use same CV as primary LOFO
+                lofo_imp_cond = LOFOImportance(lofo_dataset_cond, model=secondary_model, cv=cv_lofo, scoring='neg_root_mean_squared_error')
+                lofo_df_cond_raw = lofo_imp_cond.get_importance()
+                print(f"LOFO (Conditions) Raw Results:\\n{lofo_df_cond_raw}")
+
+                # Process results (similar to primary LOFO)
+                imp_col_name_cond = None
+                if 'importance' in lofo_df_cond_raw.columns: imp_col_name_cond = 'importance'
+                elif 'val_imp_mean' in lofo_df_cond_raw.columns: imp_col_name_cond = 'val_imp_mean'
+                elif 'importance_mean' in lofo_df_cond_raw.columns: imp_col_name_cond = 'importance_mean'
+
+                if imp_col_name_cond:
+                    print(f"Using LOFO (Conditions) importance column: '{imp_col_name_cond}'")
+                    lofo_df_cond_processed = lofo_df_cond_raw.copy()
+                    lofo_df_cond_processed['importance_mean'] = lofo_df_cond_processed[imp_col_name_cond]
+                    # Map back to original condition for better reporting/plotting
+                    lofo_df_cond_processed['Original_Condition'] = lofo_df_cond_processed['feature'].map(condition_feature_map)
+                    lofo_df_cond_processed = lofo_df_cond_processed.sort_values('importance_mean', ascending=False)
+
+                    # Plotting
+                    try:
+                        print("Generating LOFO (Conditions) plot...")
+                        plot_importance(lofo_df_cond_processed, figsize=(12, max(6, len(lofo_df_cond_processed)*0.3)))
+                        fig_lofo_cond = plt.gcf()
+                        fig_lofo_cond.suptitle('LOFO Feature Importance (Condition Features)')
+                        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+                        save_plot(fig_lofo_cond, "featimp_lofo_condition", OUTPUT_DIR)
+                        print("LOFO Importance (Conditions - Top 10):")
+                        print(lofo_df_cond_processed[['feature', 'importance_mean', 'Original_Condition']].head(10))
+                    except Exception as plot_e:
+                        print(f"Error generating LOFO (Conditions) plot: {plot_e}")
+
+                    # Add to report using the processed dataframe
+                    report_generator.add_lofo_condition_summary(lofo_df_cond_processed)
+                else:
+                    print("Could not identify the correct importance column in LOFO (Conditions) results. Skipping plots/reporting.")
+                    report_generator.add_lofo_condition_summary(None)
+            else:
+                print("Skipping LOFO on Condition Features (no valid condition features, secondary model, or lofo library).")
+                report_generator.add_lofo_condition_summary(None)
+        except ImportError:
+            print("LOFO library not found (pip install lofo-importance). Skipping LOFO for conditions.")
+            report_generator.add_lofo_condition_summary(None)
+        except Exception as e:
+            print(f"Error during LOFO Importance calculation for condition features: {e}")
+            report_generator.add_lofo_condition_summary(None)
+        # --- End LOFO on Conditions ---
+
     else:
         print("No valid binary condition features created, skipping importance analysis and linear models.")
-        # Ensure these are defined even if skipped, for the summary file logic
-        condition_importance_df = pd.DataFrame()
-        condition_mdi_df = pd.DataFrame()
-        condition_shap_df = pd.DataFrame()
-        condition_linear_results = None
 
 # --- Calculate Combined Importance (Moved from Section 10) ---
 print("\nCalculating combined importance rankings...")
@@ -1825,31 +2049,35 @@ else:
     print("No interaction pairs identified to plot.")
     pairs_to_plot = []
 
+# --- Temporarily Commenting Out the All-Pairs Loop ---
 # Generate custom interaction plots for ALL pairs
-for pair in pairs_to_plot: # Iterate through all pairs
-    if isinstance(pair, tuple) and len(pair) == 2:
-        f1, f2 = pair
-        print(f"\nCreating custom PDP interaction plot for {f1} and {f2}")
-        try:
-            # Call the custom plotting function
-            fig_custom_pdp, h_stat_custom = create_interaction_pdp(
-                surrogate_model, X_train,
-                [f1, f2],
-                [f1, f2] # Pass names explicitly
-            )
-            if fig_custom_pdp is not None:
-                # Use save_plot helper for the matplotlib figure
-                save_plot(fig_custom_pdp, f"custom_pdp_interaction_{f1}_vs_{f2}", OUTPUT_DIR)
-                # Only store strength if calculated successfully
-                if h_stat_custom is not None and not np.isnan(h_stat_custom):
-                     interaction_strengths[(f1, f2)] = h_stat_custom
-                print(f"Custom PDP interaction plot saved. Calculated H-stat Approx: {h_stat_custom if h_stat_custom is not None else 'Error'}")
-            else:
-                print(f"Custom PDP interaction plot generation failed for ({f1}, {f2}).")
-        except Exception as e:
-            print(f"Error creating custom PDP plot for ({f1}, {f2}): {e}")
-    else:
-         print(f"Skipping custom interaction plot for invalid pair: {pair}")
+# for pair in pairs_to_plot: # Iterate through all pairs
+#     if isinstance(pair, tuple) and len(pair) == 2:
+#         f1, f2 = pair
+#         print(f"\nCreating custom PDP interaction plot for {f1} and {f2}")
+#         try:
+#             # Call the custom plotting function
+#             fig_custom_pdp, h_stat_custom = create_interaction_pdp(
+#                 surrogate_model, X_train,
+#                 [f1, f2],
+#                 [f1, f2] # Pass names explicitly
+#             )
+#             if fig_custom_pdp is not None:
+#                 # Use save_plot helper for the matplotlib figure
+#                 save_plot(fig_custom_pdp, f"custom_pdp_interaction_{f1}_vs_{f2}", OUTPUT_DIR)
+#                 # Only store strength if calculated successfully
+#                 if h_stat_custom is not None and not np.isnan(h_stat_custom):
+#                      interaction_strengths[(f1, f2)] = h_stat_custom
+#                 print(f"Custom PDP interaction plot saved. Calculated H-stat Approx: {h_stat_custom if h_stat_custom is not None else 'Error'}")
+#             else:
+#                 print(f"Custom PDP interaction plot generation failed for ({f1}, {f2}).")
+#         except Exception as e:
+#             print(f"Error creating custom PDP plot for ({f1}, {f2}): {e}")
+#     else:
+#          print(f"Skipping custom interaction plot for invalid pair: {pair}")
+print("\nSKIPPING generation of custom Matplotlib interaction plots for all pairs (computationally expensive).")
+# --- End Temporary Comment Out ---
+
 
 # --- Add Feature Importance (after calculations in Sec 6/6b) ---
 # Consolidate importance results before adding to report
@@ -1957,7 +2185,7 @@ with open(summary_filename, "w") as f:
     # Add RuleFit Rules to detailed summary
     if rulefit_rules_df is not None and not rulefit_rules_df.empty:
          f.write(f"--- Top RuleFit Rules by Importance ---\n")
-         f.write(rulefit_rules_df[['rule', 'coef', 'support', 'importance']].to_string(index=False))
+         f.write(rulefit_rules_df[['rule', 'coefficient', 'importance']].to_string(index=False))
          f.write("\n\n")
 
     # Add Condition-Only Linear Model Results
@@ -2292,72 +2520,82 @@ try:
     rulefit = RuleFitRegressor(random_state=42)
     rulefit.fit(X_train.values, y_train, feature_names=features) # RuleFit often prefers numpy arrays
 
-    print("Extracting rules from RuleFit...")
-    # --- FIX: Use .rules_ attribute instead of .get_rules() ---
-    rules_ = rulefit.rules_
-    # --- END FIX ---
-    # --- ADDED: Print structure for debugging ---
-    print(f"RuleFit raw rules_ structure (first 5): {rules_[:5]}") 
-    # --- END ADDED ---
-    # --- FIX: Check list emptiness correctly and convert to DataFrame ---
-    if rules_ is None or not rules_: # Check if list is None or empty
-         print("RuleFit model did not generate any rules.")
-         rulefit_rules_df = None
-    else:
-        rulefit_rules_df = pd.DataFrame(rules_) # Convert list of dicts to DataFrame
-        # --- END FIX ---
-        # Filter out rules with zero coefficient (linear terms are handled separately if needed)
-        # Ensure DataFrame is not empty after conversion before filtering
-        if not rulefit_rules_df.empty:
-            # --- Temporarily Commented Out for Debugging --- 
-            # # --- FIX: Check if 'type' column exists before filtering --- 
-            # if 'type' in rulefit_rules_df.columns:
-            #     rulefit_rules_df = rulefit_rules_df[rulefit_rules_df['type'] == 'rule'].copy() # Ensure we copy
-            # else:
-            #     print("Warning: 'type' column not found in RuleFit rules. Skipping filtering by type.")
-            # # --- END FIX ---
-            # # Filter by non-zero coefficient
-            # if 'coef' in rulefit_rules_df.columns:
-            #     rulefit_rules_df = rulefit_rules_df[rulefit_rules_df['coef'] != 0].copy()
-            # else:
-            #      print("Warning: 'coef' column not found in RuleFit rules. Cannot filter by coefficient.")
-            #      rulefit_rules_df = pd.DataFrame() # Make empty if coef missing
-            pass # Keep indentation correct
-            # --- End Temporarily Commented Out --- 
-        else:
-             print("RuleFit generated rules but DataFrame conversion or initial rules were empty.")
-             rulefit_rules_df = pd.DataFrame() # Ensure it's an empty DF
+    # --- ADDED: Inspect fitted RuleFit object --- 
+    try:
+         print(f"Attributes of fitted RuleFit object: {dir(rulefit)}")
+    except Exception as inspect_e:
+         print(f"Could not inspect RuleFit object: {inspect_e}")
+    # --- END ADDED --- 
 
-    # --- Temporarily Commented Out for Debugging ---
-    # if rulefit_rules_df is not None and not rulefit_rules_df.empty:
-    #     # Sort rules by absolute coefficient magnitude
-    #     # --- Need to confirm 'coef' column name based on debug output --- 
-    #     # if 'coef' in rulefit_rules_df.columns: 
-    #     #     rulefit_rules_df['importance'] = rulefit_rules_df['coef'].abs()
-    #     #     rulefit_rules_df = rulefit_rules_df.sort_values('importance', ascending=False)
-    # 
-    #     #     print("\nTop 10 Rules from RuleFitRegressor:")
-    #     #     print(rulefit_rules_df[['rule', 'coef', 'support']].head(10))
-    #     # 
-    #     #     # Visualize top rule importances
-    #     #     plot_df = rulefit_rules_df.head(20).sort_values('importance', ascending=True)
-    #     #     fig_rulefit = px.bar(plot_df,
-    #     #                          x='coef', y='rule', orientation='h',
-    #     #                          title='Top 20 RuleFit Rule Importances (Coefficient Magnitude)',
-    #     #                          labels={'coef': 'Coefficient (Importance)', 'rule': 'Rule'},
-    #     #                          color='coef',
-    #     #                          color_continuous_scale=px.colors.diverging.Picnic)
-    #     #     fig_rulefit.update_layout(yaxis={'tickmode': 'array', 'tickvals': list(range(len(plot_df))), 'ticktext': plot_df['rule'].tolist()})
-    #     #     save_plot(fig_rulefit, "rulefit_rule_importance", OUTPUT_DIR)
-    #     # else:
-    #     #     print("Cannot sort/plot RuleFit importance, 'coef' column missing.")
-    # 
-    #     # Add summary to report
-    #     report_generator.add_rulefit_summary(rulefit_rules_df)
-    # else:
-    #     print("RuleFitRegressor did not generate any rules with non-zero coefficients or analysis failed.")
-    #     report_generator.add_rulefit_summary(None) # Add section indicating no rules
-    # --- End Temporarily Commented Out --- 
+    print("Extracting rules and coefficients from RuleFit...") # Changed message
+    # --- Restore and Modify Rule Extraction Logic --- 
+    rulefit_rules_df = None # Initialize
+    try:
+        # --- Corrected: Extract from rulefit.feature_names_ and rulefit.coef --- 
+        if hasattr(rulefit, 'feature_names_') and hasattr(rulefit, 'coef') and rulefit.feature_names_ is not None and rulefit.coef is not None:
+            # Use feature_names_ (contains original feats + rules) and coef
+            names_or_rules = rulefit.feature_names_
+            coefs = rulefit.coef
+            
+            if len(names_or_rules) == len(coefs):
+                # Use 'rule' column name for consistency, even though it has features too initially
+                rulefit_rules_df = pd.DataFrame({
+                    'rule': names_or_rules, 
+                    'coefficient': coefs 
+                })
+
+                # Identify rules vs linear terms (distinguish based on structure)
+                # Rules typically contain ' <=' or ' > ' and ' and '
+                rulefit_rules_df['type'] = rulefit_rules_df['rule'].apply(lambda x: 'rule' if isinstance(x, str) and (' <=' in x or ' > ' in x) and ' and ' in x else 'linear')
+                
+                # Filter for actual rules with non-zero coefficients
+                rulefit_rules_df = rulefit_rules_df[rulefit_rules_df['type'] == 'rule'].copy()
+                rulefit_rules_df = rulefit_rules_df[rulefit_rules_df['coefficient'].abs() > 1e-6].copy() # Use tolerance
+                
+                # Calculate importance (absolute coefficient)
+                if not rulefit_rules_df.empty:
+                    rulefit_rules_df['importance'] = rulefit_rules_df['coefficient'].abs()
+                    rulefit_rules_df = rulefit_rules_df.sort_values('importance', ascending=False)
+                    print(f"Successfully extracted {len(rulefit_rules_df)} rules with non-zero coefficients.")
+                else:
+                    print("No rules with non-zero coefficients found after filtering.")
+                    rulefit_rules_df = None
+            else:
+                 print(f"Mismatch between number of feature_names_ ({len(names_or_rules)}) and coefficients ({len(coefs)}).")
+                 rulefit_rules_df = None
+        else:
+            # Updated error message for clarity
+            print(f"Could not find required attributes (feature_names_={hasattr(rulefit, 'feature_names_')}, coef={hasattr(rulefit, 'coef')}) or they are None.")
+            rulefit_rules_df = None
+    except Exception as extract_e:
+        print(f"Error during RuleFit rule extraction: {extract_e}")
+        rulefit_rules_df = None
+    # --- End Rule Extraction --- 
+
+    # --- Restore Processing and Plotting --- 
+    if rulefit_rules_df is not None and not rulefit_rules_df.empty:
+        print("\nTop 10 Rules from RuleFitRegressor:")
+        # Note: 'support' column is not available with this extraction method
+        print(rulefit_rules_df[['rule', 'coefficient']].head(10))
+
+        # Visualize top rule importances
+        plot_df = rulefit_rules_df.head(20).sort_values('importance', ascending=True)
+        fig_rulefit = px.bar(plot_df,
+                             x='coefficient', y='rule', orientation='h', 
+                             title='Top 20 RuleFit Rule Importances (Coefficient Magnitude)',
+                             labels={'coefficient': 'Coefficient', 'rule': 'Rule'}, 
+                             color='coefficient',
+                             color_continuous_scale=px.colors.diverging.Picnic)
+        fig_rulefit.update_layout(yaxis={'tickmode': 'array', 'tickvals': list(range(len(plot_df))), 'ticktext': plot_df['rule'].tolist()}, height=max(400, len(plot_df)*25)) # Adjust height based on number of rules
+        save_plot(fig_rulefit, "rulefit_rule_importance", OUTPUT_DIR)
+        print("Saved RuleFit rule importance plot.")
+
+        # Add summary to report
+        report_generator.add_rulefit_summary(rulefit_rules_df)
+    else:
+        print("RuleFitRegressor did not generate any valid rules or analysis failed.")
+        report_generator.add_rulefit_summary(None) # Add section indicating no rules
+    # --- End Processing and Plotting ---
 
 except ImportError:
     print("imodels library not found (pip install imodels). Skipping RuleFit analysis.")
