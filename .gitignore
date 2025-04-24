@@ -1,0 +1,26 @@
+# Ignore analysis output folders
+safe_analysis*/
+
+# Ignore reference folder
+reference/
+
+# Common Python ignores
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment ignores
+.env
+.venv
+env/
+venv/
+ENV/
+VENV/
+*.env
+!.env.example
+
+# IDE / Editor ignores
+.vscode/
+.idea/
+*.swp
+*~ 
