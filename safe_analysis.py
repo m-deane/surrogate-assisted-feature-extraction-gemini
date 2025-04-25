@@ -673,17 +673,6 @@ Key findings are summarized below:
         else: # Fallback add at end
              self.add_section("4b. RuleFit Extracted Rules", content)
 
-    def add_granger_causality_summary(self, p_value_series, max_lag):
-        """Adds Granger causality (feature -> target) summary to the report."""
-        content = f"Pairwise Granger causality tests performed for each feature predicting the target variable, up to lag {max_lag}. "
-        content += "Lower p-values suggest a feature Granger-causes the target (helps predict its future values).\n\n"
-        content += "See the bar chart plot (`causality_granger_bar.png/.html`) for details.\n"
-        content += "Note: Granger causality checks for predictive power, not necessarily true causation, and assumes stationarity.\n"
-        self.add_section("8b. Causality Analysis (Granger Feature -> Target)", content)
-        # Store the series itself in results
-        if p_value_series is not None:
-            self.results_dict['granger_causality_feature_to_target_p_values'] = p_value_series
-
     def write_summary_file(self, summary_filename, h_3way, interaction_stability, rulefit_rules_df, combined_imp=None, condition_importance_df=None, h_values=None):
         """Write a detailed summary file with analysis results."""
         with open(summary_filename, 'w') as f:
@@ -773,7 +762,11 @@ Key findings are summarized below:
 
     def perform_lofo_importance(self, condition_features):
         """Calculate LOFO importance for condition features."""
+        if self.X_train is None or self.y_train is None:
+            print("Error: X_train or y_train not set. Cannot perform LOFO.")
+            return pd.DataFrame()
         if not condition_features or len(condition_features) == 0:
+            print("No condition features provided for LOFO.")
             return pd.DataFrame()
 
         try:
@@ -856,7 +849,11 @@ Key findings are summarized below:
 
     def get_condition_features(self):
         """Identify condition features based on statistical tests."""
-        if self.X_train is None or len(self.X_train.columns) == 0:
+        if self.X_train is None:
+             print("Error: X_train not set. Cannot get condition features.")
+             return []
+        if len(self.X_train.columns) == 0:
+            print("X_train has no columns.")
             return []
         
         condition_features = []
@@ -879,8 +876,12 @@ Key findings are summarized below:
 
     def perform_granger_causality_on_conditions(self, condition_features, max_lag=5):
         """Perform Granger causality tests on condition features."""
+        if self.X_train is None or self.y_train is None:
+            print("Error: X_train or y_train not set. Cannot perform Granger causality.")
+            return pd.Series(dtype=float) # Return empty Series with correct dtype
         if not condition_features or len(condition_features) == 0:
-            return pd.Series()
+            print("No condition features provided for Granger causality.")
+            return pd.Series(dtype=float)
         
         # Prepare data for Granger causality
         data = pd.concat([self.X_train[condition_features], pd.Series(self.y_train, name=self.target_name)], axis=1)
