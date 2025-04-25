@@ -1938,7 +1938,7 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
         condition_shap_df = pd.DataFrame() # Initialize
         try:
             # --- FIX: Add check_additivity=False --- 
-            explainer_secondary = shap.TreeExplainer(secondary_model, X_train_plus_cond, check_additivity=False)
+            explainer_secondary = shap.TreeExplainer(secondary_model, X_train_plus_cond)
             # --- END FIX --- 
             shap_values_secondary = explainer_secondary(X_train_plus_cond)
             shap_mean_abs_secondary = np.abs(shap_values_secondary.values).mean(axis=0)
