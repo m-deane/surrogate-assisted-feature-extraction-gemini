@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split, TimeSeriesSplit
+from sklearn.model_selection import train_test_split, TimeSeriesSplit, KFold # <-- Added KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, RidgeCV, LassoCV
 from sklearn.ensemble import RandomForestRegressor
@@ -300,74 +300,6 @@ class ReportGenerator:
 - Condition importance is a proxy derived from a secondary model.
 - Temporal dynamics beyond simple train/test split are not explicitly modeled in this script (e.g., complex seasonality, autocorrelation in residuals)."""
         self.add_section("7. Limitations", content)
-
-    def generate_report(self, output_path: str = None) -> str:
-        """
-        Generate the final report in markdown format.
-        """
-        report = f"""# SAFE Analysis Summary Report
-Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 
-
-## Executive Summary
-This report summarizes findings from the Surrogate-Assisted Feature Extraction (SAFE) workflow.
-It highlights key features, interactions, and decision boundaries identified by analyzing a
-surrogate model trained on the data.
-
-"""
-        for section in self.report_sections:
-            report += f"## {section['title']}\n"
-            report += f"{section['content']}\n\n"
-
-        # Write summary file with key results
-        if hasattr(self, 'results_dict'):
-            summary_path = os.path.join(os.path.dirname(output_path), 'summary.txt')
-            with open(summary_path, 'w') as f:
-                if self.results_dict.get('top_features'):
-                    f.write("Top Features:\n")
-                    for feat in self.results_dict['top_features']:
-                        f.write(f"- {feat}\n")
-                    f.write("\n")
-
-                if self.results_dict.get('feature_importance'):
-                    f.write("Feature Importance:\n")
-                    for feat, imp in self.results_dict['feature_importance'].items():
-                        f.write(f"- {feat}: {imp:.4f}\n")
-                    f.write("\n")
-
-                if self.results_dict.get('interactions'):
-                    f.write("Key Interactions:\n")
-                    for inter in self.results_dict['interactions']:
-                        f.write(f"- {inter}\n")
-                    f.write("\n")
-
-                if self.results_dict.get('surrogate_performance'):
-                    f.write("Surrogate Model Performance:\n")
-                    for metric, value in self.results_dict['surrogate_performance'].items():
-                        try:
-                            formatted_value = f"{float(value):.4f}"
-                        except (ValueError, TypeError):
-                            formatted_value = str(value)
-                        f.write(f"- {metric}: {formatted_value}\n")
-                    f.write("\n")
-
-                if self.results_dict.get('engineered_performance'):
-                    f.write("Engineered Model Performance:\n")
-                    for metric, value in self.results_dict['engineered_performance'].items():
-                        try:
-                            formatted_value = f"{float(value):.4f}"
-                        except (ValueError, TypeError):
-                            formatted_value = str(value)
-                        f.write(f"- {metric}: {formatted_value}\n")
-
-        if output_path:
-            try:
-                with open(output_path, 'w') as f:
-                    f.write(report)
-                print(f"Successfully generated report: {output_path}")
-            except Exception as e:
-                print(f"Error writing report file: {e}")
-
-        return report
 
     def _convert_to_serializable(self, obj):
         # ... (Remains the same) ...
@@ -719,25 +651,48 @@ Key findings are summarized below:
                 f.write(f"  Triplet {self.results_dict['top_3_features']}: {h_3way:.4f}\n\n")
 
             # Add Linear Model Results if they exist
-            if hasattr(self, 'results_dict') and 'rmse_orig' in self.results_dict:
-                f.write("--- Linear Model Comparison ---\n")
-                if 'actual_eng_features' in self.results_dict:
-                    f.write(f"Engineered Features Added: {self.results_dict['actual_eng_features']}\n")
-                f.write(f"Linear Model (Original): Test RMSE={self.results_dict['rmse_orig']:.4f}, R2={self.results_dict['r2_orig']:.4f}\n")
-                if 'rmse_eng' in self.results_dict:
-                    f.write(f"Linear Model (Enginrd.): Test RMSE={self.results_dict['rmse_eng']:.4f}, R2={self.results_dict['r2_eng']:.4f}\n")
-                f.write("\n")
+            # <<< MODIFY THIS BLOCK >>>
+            f.write("\n--- Linear Model Comparison ---")
+            rmse_orig = self.results_dict.get('rmse_orig')
+            r2_orig = self.results_dict.get('r2_orig')
+            rmse_eng = self.results_dict.get('rmse_eng')
+            r2_eng = self.results_dict.get('r2_eng')
+            actual_eng_features = self.results_dict.get('actual_eng_features', [])
+
+            if actual_eng_features:
+                 f.write(f"\nEngineered Features Added: {actual_eng_features}")
+            else:
+                 f.write("\n(No engineered features added or used)")
+
+            if rmse_orig is not None and r2_orig is not None:
+                 f.write(f"\nLinear Model (Original): Test RMSE={rmse_orig:.4f}, R2={r2_orig:.4f}")
+            else:
+                 f.write("\nLinear Model (Original): Results not available.")
+
+            if actual_eng_features and rmse_eng is not None and r2_eng is not None:
+                 f.write(f"\nLinear Model (Enginrd.): Test RMSE={rmse_eng:.4f}, R2={r2_eng:.4f}")
+            elif actual_eng_features:
+                 f.write("\nLinear Model (Enginrd.): Results not available.")
+            f.write("\n")
+            # <<< END MODIFICATION >>>
 
             # Add RuleFit Rules to detailed summary
-            if rulefit_rules_df is not None and not rulefit_rules_df.empty:
-                f.write(f"--- Top RuleFit Rules by Importance ---\n")
-                f.write(rulefit_rules_df[['rule', 'coef', 'support', 'importance']].to_string(index=False))
-                f.write("\n\n")
+            rulefit_rules_df_dict = self.results_dict.get('rulefit_rules_df')
+            if rulefit_rules_df_dict is not None:
+                 rulefit_rules_df = pd.DataFrame(rulefit_rules_df_dict) # Recreate DataFrame if needed
+                 if not rulefit_rules_df.empty:
+                    f.write(f"\n--- Top RuleFit Rules by Importance ---\n")
+                    f.write(rulefit_rules_df[['rule', 'coef', 'support', 'importance']].to_string(index=False))
+                    f.write("\n\n")
+            else:
+                 f.write("\n--- Top RuleFit Rules by Importance ---")
+                 f.write("\n(RuleFit analysis not performed or yielded no rules)\n\n")
 
             # Add Condition-Only Linear Model Results
-            if hasattr(self, 'results_dict') and 'condition_linear_results' in self.results_dict and self.results_dict['condition_linear_results'] is not None:
-                condition_linear_results = self.results_dict['condition_linear_results']
-                f.write("--- Linear Models Using ONLY Condition Features ---\n")
+            condition_linear_results = self.results_dict.get('condition_linear_results') # Get from dict
+            if condition_linear_results is not None:
+                # condition_linear_results = self.results_dict['condition_linear_results'] # No need to re-assign
+                f.write("\n--- Linear Models Using ONLY Condition Features ---\n")
                 f.write(f"Linear Regression: Test RMSE={condition_linear_results['linear']['rmse']:.4f}, R2={condition_linear_results['linear']['r2']:.4f}\n")
                 f.write(f"RidgeCV Regression: Test RMSE={condition_linear_results['ridge']['rmse']:.4f}, R2={condition_linear_results['ridge']['r2']:.4f}, Alpha={condition_linear_results['ridge']['alpha']:.4f}\n")
                 f.write(f"LassoCV Regression: Test RMSE={condition_linear_results['lasso']['rmse']:.4f}, R2={condition_linear_results['lasso']['r2']:.4f}, Alpha={condition_linear_results['lasso']['alpha']:.4f}\n\n")
@@ -755,8 +710,28 @@ Key findings are summarized below:
                 f.write(lasso_df_sum[['Original_Condition', 'Lasso_Coefficient', 'Is_Zero']].head(20).to_string(index=False, float_format="%.4f"))
                 f.write(f"\n(Number of Lasso coefficients shrunk to zero: {lasso_zeros})\n\n")
             else:
-                f.write("--- Linear Models Using ONLY Condition Features ---\n")
-                f.write("(Not calculated, likely no condition features were generated)\n\n")
+                f.write("\n--- Linear Models Using ONLY Condition Features ---\n")
+                f.write("(Not calculated, likely no condition features were generated or error occurred)\n\n")
+
+            # --- Added: Write Condition LOFO Importance --- 
+            condition_lofo_df = self.results_dict.get('condition_lofo_importance')
+            if condition_lofo_df is not None:
+                # Check if DataFrame before trying to access columns/methods
+                if isinstance(condition_lofo_df, pd.DataFrame) and not condition_lofo_df.empty:
+                    f.write("--- Condition Feature Importance (LOFO) ---\n")
+                    # Select relevant columns if they exist
+                    cols_to_write = ['Original_Condition', 'importance_mean', 'importance_std']
+                    existing_cols = [col for col in cols_to_write if col in condition_lofo_df.columns]
+                    f.write(condition_lofo_df[existing_cols].to_string(index=False))
+                    f.write("\n\n")
+                else:
+                    # Handle case where it might be an empty DF or wrong type
+                    f.write("--- Condition Feature Importance (LOFO) ---\n")
+                    f.write("(LOFO analysis for conditions yielded no results or failed)\n\n")
+            else:
+                f.write("--- Condition Feature Importance (LOFO) ---\n")
+                f.write("(LOFO analysis for conditions not performed)\n\n")
+            # --- End Condition LOFO --- 
 
         print(f"Saved detailed findings to: {summary_filename}")
 
@@ -1968,8 +1943,68 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
             print(f"Error calculating SHAP importance for conditions: {e}")
         # --- End SHAP Calculation ---
 
+        # --- Added: Calculate LOFO for Condition Features --- 
+        print("Calculating LOFO importance for condition features...")
+        condition_lofo_df = pd.DataFrame() # Initialize
+        try:
+            # Use KFold for cross-validation as condition features are not time-series dependent in isolation
+            cv_lofo_cond = KFold(n_splits=3, shuffle=True, random_state=42) 
+            # Create Dataset with ONLY condition features and target
+            lofo_dataset_cond = Dataset(df=pd.concat([X_train_cond_feats, y_train], axis=1), 
+                                        target=TARGET_VARIABLE, 
+                                        features=condition_feature_names)
+            
+            # Use the secondary_model (trained on original+condition) 
+            # but evaluate based on leaving out condition features
+            lofo_imp_cond = LOFOImportance(lofo_dataset_cond, 
+                                        model=secondary_model, # Evaluate importance within this model context
+                                        cv=cv_lofo_cond, 
+                                        scoring='neg_root_mean_squared_error')
+            
+            importance_df_cond_lofo = lofo_imp_cond.get_importance()
+            #print(f"Condition LOFO Raw Results:\n{importance_df_cond_lofo}")
+
+            # Process results (find the right importance column)
+            imp_col_name_cond_lofo = None
+            if 'importance' in importance_df_cond_lofo.columns:
+                imp_col_name_cond_lofo = 'importance'
+            elif 'val_imp_mean' in importance_df_cond_lofo.columns:
+                imp_col_name_cond_lofo = 'val_imp_mean'
+            elif 'importance_mean' in importance_df_cond_lofo.columns:
+                imp_col_name_cond_lofo = 'importance_mean'
+            
+            if imp_col_name_cond_lofo:
+                print(f"Using Condition LOFO importance column: '{imp_col_name_cond_lofo}'")
+                importance_df_cond_lofo['importance_mean'] = importance_df_cond_lofo[imp_col_name_cond_lofo]
+                condition_lofo_df = importance_df_cond_lofo.sort_values('importance_mean', ascending=False)                    
+                condition_lofo_df['Original_Condition'] = condition_lofo_df['feature'].map(condition_feature_map)
+
+                # Plotting
+                try:
+                    plot_importance(condition_lofo_df) # Remove scoring argument
+                    fig_cond_lofo = plt.gcf()
+                    fig_cond_lofo.suptitle(f'Top {N_TOP_CONDITIONS} Condition Feature Importances (LOFO on Secondary Model)')
+                    save_plot(fig_cond_lofo, "featimp_condition_importance_lofo", OUTPUT_DIR)
+                    print("Top 10 Condition Feature Importances (LOFO):")
+                    print(condition_lofo_df[['Original_Condition', 'importance_mean']].head(10))
+                except Exception as plot_e:
+                    print(f"Error generating Condition LOFO plot: {plot_e}")
+            else:
+                print("Could not identify the correct importance column in Condition LOFO results. Skipping plots.")
+                condition_lofo_df = pd.DataFrame() # Reset if failed
+
+        except ImportError:
+             print("LOFO library not found. Skipping LOFO for conditions.")
+        except Exception as e:
+            print(f"Error calculating LOFO importance for conditions: {e}")
+        
+        # Store results in the main dict
+        report_generator.results_dict['condition_lofo_importance'] = condition_lofo_df
+        # --- End LOFO Calculation ---
+
         # --- Added: Linear Models using ONLY Condition Features ---
         print("\n--- 6b.1 Linear Models using Condition Features ---")
+        condition_linear_results = None # Initialize local variable
         try:
             # Prepare data (using only condition features)
             X_train_cond_only = X_train_cond_feats
@@ -2031,10 +2066,13 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
                 'lasso': {'rmse': rmse_lasso_cond, 'r2': r2_lasso_cond, 'alpha': lasso_cond.alpha_,
                            'coefficients': lasso_coefs.to_dict('records')}
             }
+            # <<< ADD THIS LINE >>>
+            report_generator.results_dict['condition_linear_results'] = condition_linear_results
 
         except Exception as e:
             print(f"Error during Linear Model training on condition features: {e}")
-            condition_linear_results = None # Ensure it exists but is None
+            # Ensure it's set to None in the results dict on error too
+            report_generator.results_dict['condition_linear_results'] = None
         # --- End Linear Models on Conditions ---
 
     else:
@@ -2253,16 +2291,22 @@ print("\nGenerating Custom Interaction PDP plots (Matplotlib)...")
 interaction_strengths = {} # Store H-stats calculated by custom function
 
 # Determine the list of pairs to plot
-if interaction_pairs: # interaction_pairs holds all combinations from earlier
-    pairs_to_plot = interaction_pairs
-    print(f"Generating custom interaction plots for all {len(pairs_to_plot)} feature pairs...")
-    print("WARNING: This may take a significant amount of time and generate many files.")
+# <<< MODIFY THIS BLOCK >>>
+pairs_to_plot = [] # Initialize
+if h_values is not None and not h_values.empty:
+    pairs_to_plot = h_values.head(10).index.tolist() # Get top 10 from H-values
+    print(f"Generating custom interaction plots for top {len(pairs_to_plot)} feature pairs (based on H-statistic)...")
+elif shap_interaction_df is not None and not shap_interaction_df.empty:
+    print("H-statistic values not available. Falling back to top SHAP interactions...")
+    inter_values = shap_interaction_df.mask(np.equal(*np.indices(shap_interaction_df.shape))).stack().sort_values(ascending=False)
+    pairs_to_plot = inter_values.head(10).index.tolist()
+    print(f"Generating custom interaction plots for top {len(pairs_to_plot)} feature pairs (based on SHAP)...")
 else:
-    print("No interaction pairs identified to plot.")
-    pairs_to_plot = []
+    print("No interaction ranking (H-statistic or SHAP) available to select top pairs. Skipping custom interaction plots.")
+# <<< END MODIFICATION >>>
 
-# Generate custom interaction plots for ALL pairs
-for pair in pairs_to_plot: # Iterate through all pairs
+# Generate custom interaction plots for the selected top pairs
+for pair in pairs_to_plot: # Iterate through selected pairs
     if isinstance(pair, tuple) and len(pair) == 2:
         f1, f2 = pair
         print(f"\nCreating custom PDP interaction plot for {f1} and {f2}")
@@ -2374,14 +2418,30 @@ else:
 # --- 10. Summarise Key Findings ---
 print("\n--- 10. Summarizing Key Findings (Detailed Text File) ---")
 summary_filename = os.path.join(OUTPUT_DIR, "summary_findings_detailed.txt")
+# Now call write_summary_file, it will access results_dict directly
+# Ensure other necessary results (h_3way, interaction_stability etc.) are also in results_dict
+report_generator.results_dict['h_3way'] = h_3way
+report_generator.results_dict['interaction_stability'] = interaction_stability
+report_generator.results_dict['rulefit_rules_df'] = rulefit_rules_df
+report_generator.results_dict['combined_imp'] = combined_imp
+report_generator.results_dict['condition_importance_df'] = condition_importance_df
+report_generator.results_dict['h_values'] = h_values
+# Add other results as needed...
+report_generator.results_dict['rmse_orig'] = linear_perf.get('r2_orig') # Assuming linear_perf contains these
+report_generator.results_dict['r2_orig'] = linear_perf.get('r2_orig')
+report_generator.results_dict['rmse_eng'] = linear_perf.get('rmse_eng')
+report_generator.results_dict['r2_eng'] = linear_perf.get('r2_eng')
+report_generator.results_dict['actual_eng_features'] = engineered_feature_names
+
 report_generator.write_summary_file(
     summary_filename=summary_filename,
-    h_3way=h_3way,
-    interaction_stability=interaction_stability,
-    rulefit_rules_df=rulefit_rules_df,
-    combined_imp=combined_imp,
-    condition_importance_df=condition_importance_df,
-    h_values=h_values
+    # Pass arguments directly OR rely on them being in results_dict (relying on dict now)
+    h_3way=report_generator.results_dict.get('h_3way'), 
+    interaction_stability=report_generator.results_dict.get('interaction_stability',{}), 
+    rulefit_rules_df=report_generator.results_dict.get('rulefit_rules_df'),
+    combined_imp=report_generator.results_dict.get('combined_imp'), 
+    condition_importance_df=report_generator.results_dict.get('condition_importance_df'),
+    h_values=report_generator.results_dict.get('h_values')
 )
 
 # --- 11. Summary Visualisations ---
@@ -2572,7 +2632,6 @@ if 'X_train_eng' in locals() and 'X_test_eng' in locals():
 
 print("\n--- Generating Summary Report & Saving Results ---")
 report_generator.add_limitations_section()
-report_markdown = report_generator.generate_report(output_path=os.path.join(OUTPUT_DIR, "analysis_summary_report.md"))
 report_generator.save_analysis_results(output_path=os.path.join(OUTPUT_DIR, "analysis_results.json"))
 
 print("\n--- Workflow Complete ---")

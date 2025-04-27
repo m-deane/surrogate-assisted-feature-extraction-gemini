@@ -1,5 +1,6 @@
 import pandas as pd
 from safe_analysis import ReportGenerator, DATA_PATH, TARGET_VARIABLE, DATE_COLUMN, GROUPING_COLUMN, FILTER_VALUE, TEST_MONTHS
+import os
 
 def main():
     # Load and prepare data
@@ -53,8 +54,16 @@ def main():
     report_gen.analyze_condition_features()
     
     # Generate and save report
-    report_gen.generate_report("safe_analysis_report.md")
-    print("Analysis complete. Check safe_analysis_report.md for results.")
+    # report_gen.generate_report("safe_analysis_report.md")
+    # Call write_summary_file and save_analysis_results from the main script flow if needed
+    # Ensure results_dict is populated before calling write_summary_file
+    # Example (assuming results are computed and stored in report_gen.results_dict):
+    summary_filename = os.path.join(report_gen.output_dir, "summary_findings_detailed.txt")
+    # Pass necessary components to write_summary_file explicitly or ensure they are in results_dict
+    # report_gen.write_summary_file(summary_filename, ...)
+    report_gen.save_analysis_results(os.path.join(report_gen.output_dir, "analysis_results.json"))
+
+    print(f"Analysis complete. Check detailed summary in {summary_filename}")
 
 if __name__ == "__main__":
     main() 
