@@ -26,7 +26,7 @@ Understanding complex machine learning models ("black boxes") can be challenging
     -   Custom Partial Dependence Plots (PDP) for visualizing interactions
 -   **Condition/Threshold Analysis:**
     -   Identifies frequent decision rules/thresholds from tree models.
-    -   Calculates the importance of these conditions using secondary models.
+    -   Calculates the importance of these conditions using secondary models (Permutation, LOFO).
     -   Compares linear models built using only these condition-based features.
 -   **Time Series Capabilities:**
     -   Time-based train/test splitting.
@@ -52,18 +52,18 @@ Understanding complex machine learning models ("black boxes") can be challenging
 
 2.  **Create and activate a virtual environment (recommended):**
     ```bash
-    python -m venv venv
+    python3 -m venv venv  # Use python3 or python depending on your system
     # On macOS/Linux:
     source venv/bin/activate
     # On Windows:
     .\venv\Scripts\activate
     ```
 
-3.  **Install dependencies:**
+3.  **Install dependencies:** The `requirements.txt` file contains the exact versions of all necessary packages.
     ```bash
     pip install -r requirements.txt
     ```
-    *Note: Some plotting functions (like XGBoost tree visualization) might require additional system libraries like Graphviz.* 
+    *Note: Some plotting functions (like XGBoost tree visualization or SHAP plots) might require additional system libraries like Graphviz. Consult the respective library documentation if you encounter issues.* 
 
 ## Usage
 
@@ -96,9 +96,9 @@ The analysis generates several outputs in the specified `OUTPUT_DIR` (default: `
 
 -   **`analysis_summary_report.md`:** A detailed Markdown report summarizing all findings, including:
     -   Dataset Overview
-    -   Key Feature Importance (SHAP, Combined Rank)
-    -   Feature Interactions (H-statistic, SHAP Interactions)
-    -   Critical Thresholds/Conditions
+    -   Key Feature Importance (SHAP, Permutation, LOFO, MDI, Combined Rank)
+    -   Feature Interactions (H-statistic, SHAP Interactions, Stability)
+    -   Critical Thresholds/Conditions (Importance, Linear Model Comparison)
     -   Surrogate Model Performance
     -   RuleFit Extracted Rules (if applicable)
     -   Stationarity Tests
@@ -123,7 +123,7 @@ The analysis generates several outputs in the specified `OUTPUT_DIR` (default: `
 .
 ├── safe_analysis.py       # Core analysis logic and ReportGenerator class
 ├── run_analysis.py        # Example script to run the analysis
-├── requirements.txt       # Python package dependencies
+├── requirements.txt       # Python package dependencies (pinned versions)
 ├── README.md              # This file
 ├── .gitignore             # Specifies intentionally untracked files
 ├── _data/                 # Directory for input data files (e.g., *.csv)
