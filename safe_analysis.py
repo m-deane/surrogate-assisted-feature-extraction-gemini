@@ -927,7 +927,7 @@ TEST_MONTHS = 12
 SURROGATE_MODEL_TYPE = 'random_forest'
 N_TREES_TO_VISUALIZE = 2
 N_TOP_FEATURES = 10
-N_BOOTSTRAP_SAMPLES = 10
+N_BOOTSTRAP_SAMPLES = 3 # Reduced from 10
 OUTPUT_DIR = 'safe_analysis'
 EXOGENOUS_VARIABLES = 'all'  # Can be 'all' or a list of variable names
 
@@ -1053,7 +1053,7 @@ def friedman_h_statistic(model, X, feature1, feature2):
 
     try:
         # Create grid points for each feature
-        grid_resolution = 30  # Keeping the same resolution as before
+        grid_resolution = 15  # Reduced from 30
         features = [feature1, feature2]
         
         grid_points = {}
@@ -1133,7 +1133,7 @@ def friedman_h_3way(model, X, feature1, feature2, feature3):
 
     try:
         # Use lower grid resolution for three-way interactions to improve performance
-        grid_resolution = 10
+        grid_resolution = 8 # Reduced from 10
         features = [feature1, feature2, feature3]
         
         # Create grid points for each feature
@@ -1489,7 +1489,11 @@ report_generator.add_dataset_overview(
 print("\n--- 4. Surrogate Model Training ---")
 print(f"Training {SURROGATE_MODEL_TYPE} model...")
 if SURROGATE_MODEL_TYPE == 'random_forest':
-    surrogate_model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1, max_depth=10, min_samples_leaf=5)
+    # --- FIX: Adjust RF hyperparameters to reduce overfitting ---
+    # --- Further reducing max_depth as requested ---
+    surrogate_model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1,
+                                          max_depth=4, min_samples_leaf=10, max_features='sqrt')
+    # --- END FIX ---
 elif SURROGATE_MODEL_TYPE == 'xgboost':
     surrogate_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100, random_state=42, n_jobs=-1, max_depth=5, learning_rate=0.1)
 else:
@@ -1684,17 +1688,40 @@ try:
     rulefit.fit(X_train.values, y_train, feature_names=features) # RuleFit often prefers numpy arrays
 
     print("Extracting rules from RuleFit...")
-    # --- FIX: Use .rules_ attribute instead of .get_rules() ---
-    rules_ = rulefit.rules_
-    # --- END FIX ---
-    if rules_ is None or rules_.empty:
+    # --- FIX: Use .rules_ attribute, check list emptiness correctly, and convert list to DataFrame ---
+    rules_list_from_rulefit = rulefit.rules_
+    if not rules_list_from_rulefit: # Check if the list is None or empty
+    # --- END FIX Check ---
          print("RuleFit model did not generate any rules.")
          rulefit_rules_df = None
     else:
-        rulefit_rules_df = rules_ # Assign to the variable used later
-        # Filter out rules with zero coefficient (linear terms are handled separately if needed)
-        rulefit_rules_df = rulefit_rules_df[rulefit_rules_df['type'] == 'rule'].copy() # Ensure we copy
-        rulefit_rules_df = rulefit_rules_df[rulefit_rules_df['coef'] != 0].copy()
+        # --- FIX: Convert list of rules to DataFrame ---
+        print("Converting RuleFit rules list to DataFrame...")
+        try:
+            # Assuming rule objects have attributes like 'rule', 'coef', 'support', 'type'
+            # Filter for rules (type='rule') and non-zero coefficients during conversion
+            rules_data = [
+                {'rule': r.rule, 'coef': r.coef, 'support': r.support, 'type': r.type}
+                for r in rules_list_from_rulefit if hasattr(r, 'type') and r.type == 'rule' and hasattr(r, 'coef') and r.coef != 0
+            ]
+            if rules_data:
+                rulefit_rules_df = pd.DataFrame(rules_data)
+                print(f"Successfully converted {len(rulefit_rules_df)} rules to DataFrame.")
+            else:
+                print("No rules with non-zero coefficients found after conversion.")
+                rulefit_rules_df = None
+        except AttributeError as ae:
+             print(f"Error accessing attributes from RuleFit rule objects: {ae}")
+             rulefit_rules_df = None
+        except Exception as ex:
+            print(f"Error converting RuleFit rules list to DataFrame: {ex}")
+            rulefit_rules_df = None
+        # --- END FIX Conversion ---
+
+    # This block now correctly expects rulefit_rules_df to be a DataFrame or None
+    if rulefit_rules_df is not None and not rulefit_rules_df.empty:
+        # Sort rules by absolute coefficient magnitude
+        rulefit_rules_df['importance'] = rulefit_rules_df['coef'].abs()
 
     if rulefit_rules_df is not None and not rulefit_rules_df.empty:
         # Sort rules by absolute coefficient magnitude
@@ -2125,7 +2152,7 @@ np.fill_diagonal(h_matrix.values, 1.0)
 interaction_pairs = list(combinations(features, 2))
 
 if interaction_pairs: # Only proceed if there are pairs to calculate
-    X_sample_h = X_train.sample(min(100, len(X_train)), random_state=42) if len(X_train) > 100 else X_train
+    X_sample_h = X_train.sample(min(50, len(X_train)), random_state=42) if len(X_train) > 50 else X_train # Reduced sample size from 100
     h_calc_count = 0
     for i, (f1, f2) in enumerate(interaction_pairs):
         print(f"  Calculating H for ({f1}, {f2}) - {i+1}/{len(interaction_pairs)}", end='\r')
