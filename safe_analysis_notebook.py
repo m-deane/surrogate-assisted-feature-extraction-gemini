@@ -2126,7 +2126,7 @@ try:
          # Using feature_perturbation='interventional' with background data (X_train) is generally preferred
          # Using masker=X_train provides the background dataset directly
          # Using check_additivity=False can prevent some errors with certain model versions/outputs
-         explainer = shap.TreeExplainer(surrogate_model, masker=X_train, feature_perturbation='interventional', model_output='raw') # Add check_additivity=False? Test first.
+         explainer = shap.TreeExplainer(surrogate_model, X_train, feature_perturbation='interventional', model_output='raw') # Add check_additivity=False? Test first.
     else:
          print(f"SHAP TreeExplainer not suitable for model type {SURROGATE_MODEL_TYPE}. Skipping SHAP.")
          raise NotImplementedError("SHAP Explainer not configured for this model type.")
@@ -2500,7 +2500,7 @@ if secondary_model is not None and not X_train_plus_cond.empty:
     print("\nCalculating SHAP importance for condition features (can be slow)...")
     try:
         # Re-initialize explainer for the secondary model
-        explainer_secondary = shap.TreeExplainer(secondary_model, masker=X_train_plus_cond, feature_perturbation='interventional') # Use combined data as background
+        explainer_secondary = shap.TreeExplainer(secondary_model, X_train_plus_cond, feature_perturbation='interventional') # Use combined data as background
         shap_values_secondary = explainer_secondary(X_train_plus_cond) # Calculate SHAP for combined data
         shap_mean_abs_secondary = np.abs(shap_values_secondary.values).mean(axis=0)
 
@@ -2914,7 +2914,6 @@ for feature in top_features_pdp:
             features=[feature], # Feature to plot
             kind='both',    # 'average' for PDP, 'individual' for ICE, 'both'
             ice_lines_kw={"color": "tab:blue", "alpha": 0.2, "linewidth": 0.5},
-            pdp_line_kw={"color": "tab:orange", "linewidth": 2},
             ax=ax_pdp_ice # Pass the created axes
         )
         ax_pdp_ice.set_title(f'PDP and ICE for {feature}')
