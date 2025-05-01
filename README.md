@@ -63,7 +63,9 @@ Understanding complex machine learning models ("black boxes") can be challenging
     ```bash
     pip install -r requirements.txt
     ```
-    *Note: Some plotting functions (like XGBoost tree visualization or SHAP plots) might require additional system libraries like Graphviz. Consult the respective library documentation if you encounter issues.* 
+    *Note: Some plotting functions (like XGBoost tree visualization or SHAP plots) might require additional system libraries like Graphviz. Consult the respective library documentation if you encounter issues.*
+    *Dependency Note: If you encounter a conflict involving `explainerdashboard` and `numpy` (e.g., `explainerdashboard 0.4.8 requires numpy<2, but you have numpy 2.0.2`), this typically won't affect the core SAFE analysis unless you specifically use `explainerdashboard`.*
+    *Compatibility Note: The current code includes workarounds (removing `masker` from `shap.TreeExplainer` and `pdp_line_kw` from `sklearn.inspection.PartialDependenceDisplay`) to ensure compatibility with the library versions in `requirements.txt`. If you update libraries significantly, you might need to adjust or remove these workarounds.*
 
 ## Usage
 

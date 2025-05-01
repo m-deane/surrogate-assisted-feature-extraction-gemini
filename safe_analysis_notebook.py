@@ -17,6 +17,7 @@ import warnings
 from datetime import datetime
 from itertools import combinations
 from collections import Counter
+import time
 
 # Third-party imports
 import numpy as np
@@ -26,17 +27,17 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split, TimeSeriesSplit, KFold
+from sklearn.model_selection import train_test_split, TimeSeriesSplit, KFold, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, RidgeCV, LassoCV
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.inspection import (
     partial_dependence,
     permutation_importance,
     PartialDependenceDisplay
 )
-from sklearn.tree import plot_tree, export_text
+from sklearn.tree import plot_tree, export_text, DecisionTreeRegressor, export_graphviz
 from sklearn.utils import resample
 from imodels import RuleFitRegressor
 import shap
@@ -45,6 +46,10 @@ import xgboost as xgb
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import grangercausalitytests, adfuller
 from sklearn.base import clone
+from scipy.stats import randint, uniform
+import networkx as nx
+import ruptures as rpt
+import graphviz
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -54,16 +59,16 @@ warnings.filterwarnings('ignore')
 
 # %%
 # --- Configuration ---
-DATA_PATH = '_data/refinery_margins.csv'
-TARGET_VARIABLE = 'refinery_kbd'
+DATA_PATH = '_data/preem.csv'
+TARGET_VARIABLE = 'target'
 DATE_COLUMN = 'date'
-GROUPING_COLUMN = 'country'
-FILTER_VALUE = 'United Kingdom'
+GROUPING_COLUMN =  None
+FILTER_VALUE = None
 TEST_MONTHS = 12
 SURROGATE_MODEL_TYPE = 'random_forest' # 'random_forest' or 'xgboost'
-N_TREES_TO_VISUALIZE = 2
+N_TREES_TO_VISUALIZE = 3
 N_TOP_FEATURES = 10
-N_BOOTSTRAP_SAMPLES = 3 # Reduced for speed
+N_BOOTSTRAP_SAMPLES = 5 # Reduced for speed
 OUTPUT_DIR = 'safe_analysis_notebook_output' # New output dir for this version
 EXOGENOUS_VARIABLES = 'all'  # Can be 'all' or a list of variable names
 RANDOM_STATE = 42
@@ -487,6 +492,56 @@ class ReportGenerator:
         self.add_section("8a. Stationarity Tests (ADF)", content)
         self.results_dict['stationarity_test_adf'] = stationarity_results
 
+    def add_condition_granger_causality_summary(self, p_value_series, max_lag):
+        """Adds Granger causality (condition feature -> target) summary to the report."""
+        content = f"Pairwise Granger causality tests performed for each generated condition feature predicting the target variable, up to lag {max_lag}. "
+        content += "Lower p-values suggest a condition feature Granger-causes the target.\n\n"
+        if p_value_series is not None and not p_value_series.isnull().all():
+             significant = p_value_series[p_value_series <= 0.05]
+             if not significant.empty:
+                  content += "**Significant Condition Features (p <= 0.05):**\n"
+                  # Map names back to original conditions if possible
+                  for feat, pval in significant.items():
+                       original_cond_str = ""
+                       if 'condition_feature_map' in self.results_dict and feat in self.results_dict['condition_feature_map']:
+                            orig_cond_tuple = self.results_dict['condition_feature_map'][feat]
+                            if isinstance(orig_cond_tuple, (list, tuple)) and len(orig_cond_tuple) == 2:
+                                 original_cond_str = f" (Orig: `{orig_cond_tuple[0]} {orig_cond_tuple[1]}`)"
+                       content += f"- `{feat}` (p={pval:.3f}){original_cond_str}\n"
+             else:
+                  content += "**No condition features found significant (p <= 0.05).**\n"
+        else:
+             content += "(Results not available, all NaN, or no condition features tested).\n"
+
+        content += "\nSee the bar chart plot (`causality_condition_granger_bar.png/.html`) for details.\n"
+        content += "Note: Assumes stationarity (check Section 8a) and predictive power, not causation.\n"
+        self.add_section("8c. Causality Analysis (Condition Feature -> Target)", content)
+        # Store the series itself in results
+        if p_value_series is not None:
+            self.results_dict['granger_causality_condition_to_target_p_values'] = p_value_series
+        else:
+             self.results_dict['granger_causality_condition_to_target_p_values'] = None
+             
+    def add_temporal_importance_summary(self, temporal_importance_results, top_features_plot):
+        """Adds summary of temporal feature importance analysis."""
+        content = "Feature importance was analyzed over time using a sliding window approach on the training data. "
+        content += "This helps identify if feature relevance changes over different periods.\n\n"
+
+        if temporal_importance_results:
+            num_windows = len(temporal_importance_results)
+            content += f"**Analysis Summary ({num_windows} windows):**\n"
+            content += "- The line plot `temporal_importance_trends.png/.html` shows the importance trends for the top features.\n"
+            # Optional: Add analysis of variance or specific changes here if calculated
+            content += "- Features consistently high or low, or those showing significant changes in importance over time, might warrant further investigation.\n"
+        else:
+            content += "Temporal importance analysis was not performed or yielded no results.\n"
+
+        self.add_section("9. Temporal Feature Importance Analysis", content)
+        # Store results (maybe summary stats or the plot data itself)
+        # For now, just storing the raw list of dicts might be large, consider summarizing
+        self.results_dict['temporal_importance_results'] = temporal_importance_results # Could be large!
+        self.results_dict['temporal_importance_top_features_plotted'] = top_features_plot
+
     def add_shap_interaction_summary(self, shap_interaction_df):
         """Adds summary of top SHAP interactions."""
         content = "Top pairwise feature interactions based on Mean Absolute SHAP Interaction values.\n"
@@ -562,9 +617,8 @@ class ReportGenerator:
     def add_dynamic_summary(self):
         """Generates a dynamic narrative summary of key findings based on self.results_dict."""
         summary_text = """
-This analysis utilized a surrogate model ({model_type}) to explore feature relationships and importance for predicting '{target}'.
-Key findings are summarized below:
-
+        This analysis utilized a surrogate model ({model_type}) to explore feature relationships and importance for predicting '{target}'.
+        Key findings are summarized below:
 """.format(model_type=self.surrogate_model_type, target=self.target_name or TARGET_VARIABLE)
 
         key_findings_dict = {} # To store summary points for JSON
@@ -974,7 +1028,7 @@ def save_plot(fig, filename, output_dir=OUTPUT_DIR):
 
         elif isinstance(fig, plt.Figure):
              filepath_png = filepath_base + ".png"
-             fig.savefig(filepath_png, bbox_inches='tight', dpi=150) # Increase dpi
+             fig.savefig(filepath_png) # Increase dpi
              plt.close(fig) # Close plot after saving
              print(f"Saved plot: {filepath_png}")
 
@@ -1110,7 +1164,9 @@ def friedman_h_statistic(model, X, feature1, feature2, grid_resolution=15, sampl
 
     X_sample = X
     if sample_size is not None and sample_size < len(X):
-        X_sample = X.sample(sample_size, random_state=RANDOM_STATE)
+        # X_sample = X.sample(sample_size, random_state=RANDOM_STATE)
+        print(f"Warning: Sample size ({sample_size}) specified, but full dataset ({len(X)}) is being used.")
+        pass # Keep X_sample as full X
 
     try:
         # Create grid points for each feature
@@ -1191,7 +1247,9 @@ def friedman_h_3way(model, X, feature1, feature2, feature3, grid_resolution=8, s
 
     X_sample = X
     if sample_size is not None and sample_size < len(X):
-        X_sample = X.sample(sample_size, random_state=RANDOM_STATE)
+        # X_sample = X.sample(sample_size, random_state=RANDOM_STATE)
+        print(f"Warning: Sample size ({sample_size}) specified for 3-way H, but full dataset ({len(X)}) is being used.")
+        pass # Keep X_sample as full X
 
     try:
         features = [feature1, feature2, feature3]
@@ -1326,8 +1384,9 @@ def create_interaction_pdp(surrogate_model, X_train, features, feature_names=Non
         # Calculate PDP values using predict on samples
         z_values = np.zeros(len(grid_points))
         # Use a sample of X_train for prediction if it's large, for efficiency
-        sample_size_pdp = min(len(X_train), 1000)
-        X_temp_base = X_train.sample(sample_size_pdp, random_state=RANDOM_STATE) if sample_size_pdp < len(X_train) else X_train.copy()
+        # sample_size_pdp = min(len(X_train), 1000)
+        # X_temp_base = X_train.sample(sample_size_pdp, random_state=RANDOM_STATE) if sample_size_pdp < len(X_train) else X_train.copy()
+        X_temp_base = X_train.copy()
 
         for i, point in enumerate(grid_points):
             X_temp = X_temp_base.copy()
@@ -1421,9 +1480,10 @@ def create_interaction_pdp(surrogate_model, X_train, features, feature_names=Non
          # Re-use the friedman_h_statistic function logic on the calculated grids
          # This requires calculating individual PDPs on the same grid points
          individual_pd = {}
+         sample_size_pdp = len(X_train) # Use full dataset size here
          for feature, grid_vals in zip(features, feature_values):
              pd_values = np.zeros_like(grid_vals, dtype=float)
-             X_temp_base_h = X_train.sample(sample_size_pdp, random_state=RANDOM_STATE) if sample_size_pdp < len(X_train) else X_train.copy() # Use same sample as PDP
+             X_temp_base_h = X_train.copy() # Use full dataset
              for i, value in enumerate(grid_vals):
                  X_temp = X_temp_base_h.copy()
                  X_temp[feature] = value
@@ -1526,6 +1586,429 @@ def perform_granger_causality(data_features, data_target, feature_names, max_lag
 
     print("Granger Causality tests complete.")
     return p_values
+# %%
+def analyze_temporal_importance(X, y, feature_names, window_size=10):
+    """Analyze how feature importance changes over time"""
+    # Ensure X and y are pandas objects with indices
+    if not isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(X, columns=feature_names)
+    if not isinstance(y, pd.Series):
+        y = pd.Series(y)
+    
+    # Create windows
+    n_windows = max(1, len(X) // window_size)
+    temporal_importance = []
+    
+    for i in range(n_windows):
+        start_idx = i * window_size
+        end_idx = min(len(X), (i + 1) * window_size)
+        
+        # Skip windows that are too small
+        if end_idx - start_idx < 5:
+            continue
+        
+        # Get window data
+        X_window = X.iloc[start_idx:end_idx]
+        y_window = y.iloc[start_idx:end_idx]
+        
+        # Skip if window has no variation in y
+        if len(y_window.unique()) < 2:
+            continue
+        
+        # Fit model on window
+        try:
+            window_model = RandomForestRegressor( # Use RandomForest instead
+                n_estimators=30, # Fewer trees for speed
+                max_depth=5,     # Limit depth
+                min_samples_leaf=5, # Min samples
+                random_state=RANDOM_STATE + i, # Vary state slightly per window
+                n_jobs=-1 # Use available cores
+            ).fit(X_window, y_window)
+            
+            # Calculate feature importance (MDI for RF)
+            if hasattr(window_model, 'feature_importances_'):
+                window_importance = pd.Series(
+                    window_model.feature_importances_, 
+                    index=X_window.columns
+                )
+                
+                temporal_importance.append({
+                    'window': i,
+                    'start_idx': start_idx,
+                    'end_idx': end_idx,
+                    'importance': window_importance
+                })
+            else:
+                print(f"Warning: RF model for window {i} lacks feature_importances_")
+        except Exception as e:
+            print(f"Error in window {i}: {e}")
+            continue
+    
+    return temporal_importance
+
+def safe_transform_numeric(X, surrogate_model, feature_name, penalty=0.8):
+    """Transform a numeric feature using the SAFE method"""
+    # Get the column index
+    feature_idx = list(X.columns).index(feature_name)
+    
+    # Get feature values
+    feature_values = X[feature_name].values
+    min_val, max_val = np.min(feature_values), np.max(feature_values)
+    
+    # Create a grid of values
+    grid_points = np.linspace(min_val, max_val, 1000)
+    
+    # Create copies of X with the feature set to each grid point
+    pdp_data = []
+    for point in grid_points:
+        X_copy = X.copy()
+        X_copy[feature_name] = point
+        pdp_data.append(surrogate_model.predict(X_copy).mean())
+    
+    # Find changepoints
+    algo = rpt.Pelt(model="l2").fit(np.array(pdp_data))
+    changepoints = algo.predict(pen=penalty)
+    
+    # Convert changepoint indices to feature values
+    changepoint_values = [grid_points[i] for i in changepoints[:-1]]
+    
+    # Create transformed features
+    transformed_feature_data = np.zeros((len(X), len(changepoint_values)))
+    for i, x in enumerate(feature_values):
+        for j, threshold in enumerate(changepoint_values):
+            if x >= threshold:
+                transformed_feature_data[i, j] = 1
+    
+    # Create column names for the transformed features
+    if not changepoint_values:
+        # If no changepoints found, return binary feature based on median
+        median_val = np.median(feature_values)
+        transformed_feature_data = np.zeros((len(X), 1))
+        transformed_feature_data[:, 0] = (feature_values >= median_val).astype(int)
+        column_names = [f"{feature_name}_>={median_val:.2f}"]
+    else:
+        column_names = [f"{feature_name}_>={val:.2f}" for val in changepoint_values]
+    
+    return pd.DataFrame(transformed_feature_data, columns=column_names, index=X.index)
+
+def apply_safe_transformation(X_train, X_test, surrogate_model, important_features, penalty=0.8):
+    """Apply SAFE transformation to selected features"""
+    # Always include totaltar
+    if 'totaltar' in X_train.columns and 'totaltar' not in important_features:
+        important_features = list(important_features) + ['totaltar']
+    
+    # Transform each important feature
+    transformed_train_dfs = []
+    transformed_test_dfs = []
+    
+    for feature in important_features:
+        print(f"Transforming feature: {feature}")
+        
+        # Apply transformation to training data
+        transformed_train = safe_transform_numeric(X_train, surrogate_model, feature, penalty)
+        transformed_train_dfs.append(transformed_train)
+        
+        # Apply transformation to test data using the SAME transformation
+        # Get the column names from the transformed train data
+        train_col_names = transformed_train.columns
+        
+        # Get threshold values from column names
+        thresholds = []
+        for col in train_col_names:
+            # Extract threshold value from column name (e.g., "feature_>=10.5" -> 10.5)
+            threshold_str = col.split('>=')[1]
+            thresholds.append(float(threshold_str))
+        
+        # Apply thresholds to test data
+        feature_values = X_test[feature].values
+        transformed_data = np.zeros((len(X_test), len(thresholds)))
+        
+        for i, x in enumerate(feature_values):
+            for j, threshold in enumerate(thresholds):
+                if x >= threshold:
+                    transformed_data[i, j] = 1
+        
+        # Create DataFrame with the same column names as training
+        transformed_test = pd.DataFrame(transformed_data, columns=train_col_names, index=X_test.index)
+        transformed_test_dfs.append(transformed_test)
+    
+    # Combine transformed features
+    X_train_transformed = pd.concat(transformed_train_dfs, axis=1)
+    X_test_transformed = pd.concat(transformed_test_dfs, axis=1)
+    
+    return X_train_transformed, X_test_transformed
+
+def create_interaction_features(X_train, X_test, interaction_df, threshold=0.01):
+    """Create explicit interaction features for strongly interacting pairs"""
+    train_interaction_features = pd.DataFrame(index=X_train.index)
+    test_interaction_features = pd.DataFrame(index=X_test.index)
+    
+    # Get pairs above threshold
+    pairs = []
+    for i in range(len(interaction_df)):
+        for j in range(i+1, len(interaction_df)):
+            if interaction_df.iloc[i, j] > threshold:
+                pairs.append((interaction_df.columns[i], interaction_df.columns[j]))
+    
+    print(f"Creating {len(pairs)} interaction features...")
+    
+    for i, j in pairs:
+        # Create multiplicative interaction
+        name = f"{i}_x_{j}"
+        train_interaction_features[name] = X_train[i] * X_train[j]
+        test_interaction_features[name] = X_test[i] * X_test[j]
+        
+        # Create binary threshold interactions (using median)
+        median_i = X_train[i].median()
+        median_j = X_train[j].median()
+        
+        name = f"{i}_>{median_i:.2f}_AND_{j}_>{median_j:.2f}"
+        train_interaction_features[name] = ((X_train[i] > median_i) & (X_train[j] > median_j)).astype(int)
+        test_interaction_features[name] = ((X_test[i] > median_i) & (X_test[j] > median_j)).astype(int)
+    
+    return train_interaction_features, test_interaction_features
+
+def train_decision_tree(X_train, y_train, X_test, y_test, max_depth=5):
+    """Train a decision tree with controlled complexity"""
+    # Ensure X_test has the same columns as X_train
+    missing_cols = set(X_train.columns) - set(X_test.columns)
+    for col in missing_cols:
+        X_test[col] = 0  # Add missing columns with zeros
+    
+    # Ensure columns are in the same order
+    X_test = X_test[X_train.columns]
+    
+    dt_model = DecisionTreeRegressor(max_depth=max_depth, random_state=42)
+    dt_model.fit(X_train, y_train)
+    
+    # Evaluate performance
+    train_score = r2_score(y_train, dt_model.predict(X_train))
+    test_score = r2_score(y_test, dt_model.predict(X_test))
+    test_mse = mean_squared_error(y_test, dt_model.predict(X_test))
+    test_mae = mean_absolute_error(y_test, dt_model.predict(X_test))
+    
+    print(f"Decision Tree Training R²: {train_score:.4f}")
+    print(f"Decision Tree Test R²: {test_score:.4f}")
+    print(f"Decision Tree Test MSE: {test_mse:.4f}")
+    print(f"Decision Tree Test MAE: {test_mae:.4f}")
+    
+    return dt_model
+
+# Function to extract rules from a decision tree
+def extract_rules_from_tree(tree, feature_names):
+    """Extract decision rules from a fitted tree"""
+    tree_ = tree.tree_
+    feature_name = [
+        feature_names[i] if i != -2 else "undefined!"  # -2 is the new undefined value
+        for i in tree_.feature
+    ]
+    
+    paths = []
+    path = []
+    
+    def dfs(node, path, paths):
+        if tree_.feature[node] != -2:  # -2 is the new undefined value
+            name = feature_name[node]
+            threshold = tree_.threshold[node]
+            
+            # Left path (<=)
+            path.append((name, "<=", threshold))
+            dfs(tree_.children_left[node], path, paths)
+            path.pop()
+            
+            # Right path (>)
+            path.append((name, ">", threshold))
+            dfs(tree_.children_right[node], path, paths)
+            path.pop()
+        else:
+            # Leaf node
+            path_copy = list(path)
+            paths.append(path_copy)
+    
+    dfs(0, path, paths)
+    
+    # Create rule strings from paths
+    rules = []
+    for path in paths:
+        rule = "IF "
+        for p in path:
+            if rule != "IF ":
+                rule += " AND "
+            rule += f"{p[0]} {p[1]} {p[2]:.2f}"
+        rule += f" THEN prediction = {tree_.value[0].flatten()[0]:.2f}"
+        rules.append(rule)
+    
+    return rules, paths
+
+def analyze_decision_paths(dt_model, X, y):
+    """Analyze decision paths in the tree and their contributions"""
+    # Get decision path
+    decision_path = dt_model.decision_path(X)
+    leaf_ids = dt_model.apply(X)
+    
+    # Count samples in each leaf
+    leaf_counts = np.bincount(leaf_ids, minlength=dt_model.tree_.node_count)
+    
+    # Calculate average target value for each leaf
+    leaf_values = {}
+    for leaf_id in np.unique(leaf_ids):
+        leaf_samples = np.where(leaf_ids == leaf_id)[0]
+        leaf_values[leaf_id] = y.iloc[leaf_samples].mean()
+    
+    # Convert to DataFrame for easier analysis
+    leaf_df = pd.DataFrame({
+        'leaf_id': list(leaf_values.keys()),
+        'samples': [leaf_counts[i] for i in leaf_values.keys()],
+        'mean_target': list(leaf_values.values())
+    }).sort_values('samples', ascending=False)
+    
+    return leaf_df
+
+def analyze_thresholds(X_train_transformed, surrogate_model, original_columns):
+    """Analyze thresholds identified in the SAFE transformation"""
+    thresholds = {}
+    impact_scores = {}
+    
+    # Extract thresholds from column names
+    for col in X_train_transformed.columns:
+        if '>=' in col and 'AND' not in col and '_x_' not in col:
+            feature, threshold_str = col.split('>=')
+            feature = feature.rstrip('_')
+            threshold = float(threshold_str)
+            
+            if feature not in thresholds:
+                thresholds[feature] = []
+            thresholds[feature].append(threshold)
+            
+            # Measure threshold impact using surrogate model
+            temp_data = X_train.copy()
+            temp_data[f"{feature}_threshold"] = (temp_data[feature] >= threshold).astype(int)
+            
+            # Calculate feature importance of this threshold in surrogate model context
+            base_pred = surrogate_model.predict(X_train)
+            # Compare predictions when forcing points below threshold
+            temp_data_below = X_train.copy()
+            mask = temp_data_below[feature] >= threshold
+            if mask.sum() > 0:  # Only proceed if there are points above threshold
+                orig_values = temp_data_below.loc[mask, feature].copy()
+                # Set to just below threshold
+                temp_data_below.loc[mask, feature] = threshold - 0.0001
+                pred_below = surrogate_model.predict(temp_data_below)
+                # Calculate average impact of crossing this threshold
+                impact_above = np.abs(base_pred[mask] - pred_below[mask]).mean()
+                # Store impact score
+                impact_scores[(feature, threshold)] = impact_above
+                # Reset the original values
+                temp_data_below.loc[mask, feature] = orig_values
+    
+    # Sort thresholds for each feature
+    for feature in thresholds:
+        thresholds[feature].sort()
+    
+    # Create summary dataframe of thresholds and impacts
+    impact_df = pd.DataFrame([
+        {
+            'Feature': feature,
+            'Threshold': threshold,
+            'Impact': impact_scores.get((feature, threshold), 0),
+            'Data_Percentage_Above': (X_train[feature] >= threshold).mean() * 100
+        }
+        for (feature, threshold_list) in thresholds.items()
+        for threshold in threshold_list
+    ])
+    
+    impact_df = impact_df.sort_values('Impact', ascending=False)
+    
+    return thresholds, impact_df
+
+# Create a feature interaction heatmap from surrogate tree
+def extract_feature_interactions_from_tree(tree, feature_names):
+    """Extract feature interactions from decision paths in a tree"""
+    tree_ = tree.tree_
+    feature_name = [
+        feature_names[i] if i != -2 else "undefined!"  # -2 is the new undefined value
+        for i in tree_.feature
+    ]
+    
+    interactions = np.zeros((len(feature_names), len(feature_names)))
+    
+    def count_interactions(node, path, interactions):
+        if tree_.feature[node] != -2:  # -2 is the new undefined value
+            current_feature = feature_names.index(feature_name[node])
+            
+            # Count interactions with features in the path
+            for prev_feature in path:
+                interactions[prev_feature, current_feature] += 1
+                interactions[current_feature, prev_feature] += 1
+            
+            # Continue traversal
+            path.append(current_feature)
+            count_interactions(tree_.children_left[node], path, interactions)
+            count_interactions(tree_.children_right[node], path, interactions)
+            path.pop()
+    
+    count_interactions(0, [], interactions)
+    return interactions
+
+def plot_interaction_network(interaction_df, feature_importance, threshold=0.01):
+    """Plot network graph of feature interactions"""
+    # Create graph
+    G = nx.Graph()
+    
+    # Normalize importances for node sizing
+    max_importance = feature_importance['mean_abs_shap'].max()
+    normalized_importance = feature_importance['mean_abs_shap'] / max_importance
+    
+    # Add nodes
+    for feature in interaction_df.columns:
+        # Size nodes by feature importance
+        size = normalized_importance.get(feature, 0.1) * 1000
+        G.add_node(feature, size=size)
+    
+    # Add edges
+    for i in range(len(interaction_df)):
+        for j in range(i+1, len(interaction_df)):
+            strength = interaction_df.iloc[i, j]
+            if strength > threshold:
+                G.add_edge(
+                    interaction_df.columns[i], 
+                    interaction_df.columns[j], 
+                    weight=strength
+                )
+    
+    # Create plot
+    plt.figure(figsize=(16, 16))
+    pos = nx.spring_layout(G, k=0.3, iterations=50)
+    
+    # Draw nodes
+    node_sizes = [G.nodes[n].get('size', 300) for n in G.nodes]
+    node_colors = ['red' if n == 'totaltar' else 'skyblue' for n in G.nodes]
+    
+    nx.draw_networkx_nodes(G, pos, 
+                          node_size=node_sizes,
+                          node_color=node_colors, 
+                          alpha=0.8)
+    
+    # Draw edges with weights as thickness
+    edge_weights = [G.edges[e]['weight'] * 10 for e in G.edges]
+    nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.5)
+    
+    # Draw labels
+    nx.draw_networkx_labels(G, pos, font_size=12)
+    
+    # Add explanation text to the figure
+    plt.figtext(0.5, 0.01, 
+                "HOW TO READ THIS PLOT:\n"
+                "• Node size represents feature importance (larger = more important)\n"
+                "• Edge thickness represents interaction strength between features\n"
+                "• Red node highlights 'totaltar' variable\n"
+                "• Closely positioned nodes have stronger interactions",
+                ha="center", fontsize=12, bbox={"facecolor":"lightgrey", "alpha":0.5, "pad":5})
+    
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig('interaction_network.png', bbox_inches='tight')
+    return G
 
 # %% [markdown]
 # ## 5. Initialization
@@ -1721,38 +2204,160 @@ report_generator.add_dataset_overview(
 print("\n--- 4. Surrogate Model Training ---")
 print(f"Training {SURROGATE_MODEL_TYPE} model...")
 
-if SURROGATE_MODEL_TYPE == 'random_forest':
-    # Adjusted RF hyperparameters to reduce potential overfitting
-    surrogate_model = RandomForestRegressor(
-        n_estimators=100,
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
-        max_depth=6,          # Slightly deeper than previous attempt
-        min_samples_leaf=10,  # Minimum samples at a leaf node
-        max_features='sqrt',  # Consider sqrt or log2 of features at each split
-        oob_score=True        # Enable Out-of-Bag score for generalization estimate
-    )
-elif SURROGATE_MODEL_TYPE == 'xgboost':
-    surrogate_model = xgb.XGBRegressor(
-        objective='reg:squarederror',
-        n_estimators=100,
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
-        max_depth=5,          # Max depth of trees
-        learning_rate=0.1,    # Step size shrinkage
-        subsample=0.8,        # Fraction of samples used per tree
-        colsample_bytree=0.8  # Fraction of features used per tree
-    )
-else:
-    raise ValueError("Invalid SURROGATE_MODEL_TYPE. Choose 'xgboost' or 'random_forest'.")
+# Split the training data further for hyperparameter tuning and early stopping
+print("\n--- Splitting Training Data for Tuning ---")
+# Ensure data is sorted by time index if not already done (should be from prep)
+X_train_sorted = X_train.sort_index()
+y_train_sorted = y_train.sort_index()
 
+n_train_total = len(X_train_sorted)
+n_val = int(n_train_total * 0.20) # 20% for validation
+n_train_sub = n_train_total - n_val
+
+if n_train_sub < 1 or n_val < 1:
+    print("Warning: Training data too small for train/validation split during tuning. Skipping tuning.")
+    # Fallback to default parameters - this part will be handled in the model fitting section
+    best_params = {} # Will use default params later
+    skip_tuning = True
+else:
+    skip_tuning = False
+    X_train_sub = X_train_sorted.iloc[:n_train_sub]
+    y_train_sub = y_train_sorted.iloc[:n_train_sub]
+    X_val = X_train_sorted.iloc[n_train_sub:]
+    y_val = y_train_sorted.iloc[n_train_sub:]
+    print(f"Split training data: Sub-Train={X_train_sub.shape}, Validation={X_val.shape}")
+
+print("\n--- 4. Surrogate Model Training (with Hyperparameter Tuning) ---")
+
+if skip_tuning:
+    print("Skipping hyperparameter tuning due to small dataset size.")
+    if SURROGATE_MODEL_TYPE == 'random_forest':
+        surrogate_model = RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=-1, oob_score=True)
+        print("Using default RandomForestRegressor parameters.")
+    elif SURROGATE_MODEL_TYPE == 'xgboost':
+        surrogate_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=RANDOM_STATE, n_jobs=-1)
+        print("Using default XGBRegressor parameters.")
+    else:
+        raise ValueError("Invalid SURROGATE_MODEL_TYPE. Choose 'xgboost' or 'random_forest'.")
+
+else:
+    print(f"Tuning {SURROGATE_MODEL_TYPE} model using RandomizedSearchCV...")
+    start_time_tuning = time.time()
+    best_params = {}
+
+    # Define search spaces
+    rf_param_dist = {
+        'n_estimators': randint(50, 200),
+        'max_depth': randint(3, 15),
+        'min_samples_leaf': randint(5, 20),
+        'max_features': ['sqrt', 'log2', 0.5, 0.7, 0.9] # Include float options
+    }
+
+    xgb_param_dist = {
+        'n_estimators': randint(50, 300),
+        'max_depth': randint(3, 10),
+        'learning_rate': uniform(0.01, 0.2), # learning_rate range [0.01, 0.21]
+        'subsample': uniform(0.6, 0.4),     # subsample range [0.6, 1.0]
+        'colsample_bytree': uniform(0.6, 0.4), # colsample_bytree range [0.6, 1.0]
+        'gamma': uniform(0, 0.5),           # gamma range [0, 0.5]
+        'reg_alpha': uniform(0, 1),         # L1 regularization
+        'reg_lambda': uniform(0, 1)         # L2 regularization
+    }
+
+    # Define TimeSeriesSplit for CV within RandomizedSearch
+    # Ensure enough splits are possible given the sub-training data size
+    n_splits_tuning = min(3, len(X_train_sub) // (n_val or 1)) # Ensure n_val is not 0
+    if len(X_train_sub) < 2 * n_splits_tuning or n_splits_tuning < 2:
+        print(f"Warning: Sub-training data size ({len(X_train_sub)}) is too small for {n_splits_tuning} TimeSeriesSplits. Adjusting splits or skipping CV.")
+        n_splits_tuning = 2 if len(X_train_sub) >= 4 else 1 # Fallback to 2 splits if possible, or 1 (no CV)
+
+    if n_splits_tuning > 1:
+        cv_tuning = TimeSeriesSplit(n_splits=n_splits_tuning)
+    else:
+        cv_tuning = None # Cannot perform CV
+        print("Warning: CV disabled in RandomizedSearchCV due to small sub-training set size.")
+
+
+    n_iter_search = 15 # Number of parameter settings that are sampled
+
+    if SURROGATE_MODEL_TYPE == 'random_forest':
+        model_to_tune = RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=-1, oob_score=False) # OOB doesn't work well with CV split
+        search = RandomizedSearchCV(
+            estimator=model_to_tune,
+            param_distributions=rf_param_dist,
+            n_iter=n_iter_search,
+            cv=cv_tuning,
+            scoring='neg_root_mean_squared_error', # Lower RMSE is better (higher neg_rmse)
+            n_jobs=-1,
+            random_state=RANDOM_STATE,
+            verbose=1 # Show progress
+        )
+        search.fit(X_train_sub, y_train_sub) # Fit on the sub-training set
+        best_params = search.best_params_
+        print(f"\nBest RandomForest params found: {best_params}")
+        # Re-enable OOB score for the final model if desired
+        final_params = best_params.copy()
+        final_params['oob_score'] = True
+        final_params['random_state'] = RANDOM_STATE
+        final_params['n_jobs'] = -1
+        surrogate_model = RandomForestRegressor(**final_params)
+
+
+    elif SURROGATE_MODEL_TYPE == 'xgboost':
+        model_to_tune = xgb.XGBRegressor(objective='reg:squarederror', random_state=RANDOM_STATE, n_jobs=-1)
+        # Define fit parameters for early stopping
+        fit_params = {
+            'early_stopping_rounds': 10,
+            'eval_set': [(X_val, y_val)],
+            'verbose': False # Suppress verbose output during each fit
+        }
+        search = RandomizedSearchCV(
+            estimator=model_to_tune,
+            param_distributions=xgb_param_dist,
+            n_iter=n_iter_search,
+            cv=cv_tuning,
+            scoring='neg_root_mean_squared_error',
+            n_jobs=-1,
+            random_state=RANDOM_STATE,
+            verbose=1
+        )
+        # Pass fit_params to the RandomizedSearchCV's fit method
+        search.fit(X_train_sub, y_train_sub, **fit_params)
+        best_params = search.best_params_
+        print(f"\nBest XGBoost params found: {best_params}")
+        # Important: Refit the final model with best params on *full* train data
+        # without early stopping (or potentially stopping on the test set - not ideal)
+        # Best practice is usually to train on full data with optimal estimators found
+        # Retrieve the 'best_ntree_limit' if early stopping was used effectively in the search
+        best_iteration = getattr(search.best_estimator_, 'best_iteration', None)
+        final_params = best_params.copy()
+        if best_iteration is not None and best_iteration > 0:
+             final_params['n_estimators'] = best_iteration # Use optimal number of trees found
+             print(f"Using best_iteration from tuning: {best_iteration} estimators")
+        else:
+             print(f"Using n_estimators from best_params: {final_params.get('n_estimators')}")
+
+        final_params['objective'] = 'reg:squarederror'
+        final_params['random_state'] = RANDOM_STATE
+        final_params['n_jobs'] = -1
+        surrogate_model = xgb.XGBRegressor(**final_params)
+
+    else:
+        raise ValueError("Invalid SURROGATE_MODEL_TYPE. Choose 'xgboost' or 'random_forest'.")
+
+    end_time_tuning = time.time()
+    print(f"Hyperparameter tuning completed in {end_time_tuning - start_time_tuning:.2f} seconds.")
+
+# --- Final Model Training ---
+print(f"\nFitting final {SURROGATE_MODEL_TYPE} model with best parameters on the full training set...")
 try:
+    # Fit the surrogate_model (instantiated with best params or defaults) on the original X_train, y_train
     surrogate_model.fit(X_train, y_train)
 except Exception as fit_e:
-    print(f"Error fitting surrogate model: {fit_e}")
+    print(f"Error fitting final surrogate model: {fit_e}")
     exit()
 
-print("Evaluating surrogate model...")
+print("Evaluating final tuned surrogate model...")
 y_pred_train_surrogate = surrogate_model.predict(X_train)
 y_pred_test_surrogate = surrogate_model.predict(X_test)
 
@@ -1761,7 +2366,7 @@ test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test_surrogate))
 train_r2 = r2_score(y_train, y_pred_train_surrogate)
 test_r2 = r2_score(y_test, y_pred_test_surrogate)
 
-print(f"Surrogate Model Performance:")
+print(f"Final Surrogate Model Performance:")
 print(f"  Train RMSE: {train_rmse:.4f}, R2: {train_r2:.4f}")
 print(f"  Test RMSE:  {test_rmse:.4f}, R2: {test_r2:.4f}")
 if hasattr(surrogate_model, 'oob_score_') and surrogate_model.oob_score_:
@@ -1775,6 +2380,9 @@ report_generator.add_surrogate_model_performance(
     test_rmse=test_rmse,
     test_r2=test_r2
 )
+
+# Store best params in results dict
+report_generator.results_dict['best_surrogate_params'] = best_params
 
 # %% [markdown]
 # ## 8. Surrogate Model Interpretation - Rules & Thresholds
@@ -2025,7 +2633,7 @@ try:
     # Initialize and fit RuleFitRegressor
     # Consider adjusting hyperparameters like max_rules, tree_size, tree_depth etc.
     # Using default hyperparameters first. Ensure data is numpy array.
-    rulefit = RuleFitRegressor(random_state=RANDOM_STATE, max_rules=50) # Limit max rules
+    rulefit = RuleFitRegressor(random_state=RANDOM_STATE, max_rules=10) # Limit max rules
     # Convert to numpy, handle potential errors
     try:
          X_train_np = X_train.values
@@ -2351,13 +2959,17 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
                     # Create the binary feature
                     if op == 'le':
                          X_train_cond_feats[new_feat_name] = (X_train[feature] <= threshold).astype(int)
+                         X_train_cond_feats[new_feat_name] = X_train[feature] * X_train_cond_feats[new_feat_name]
                          if feature in X_test.columns:
                               X_test_cond_feats[new_feat_name] = (X_test[feature] <= threshold).astype(int)
+                              X_test_cond_feats[new_feat_name] = X_test[feature] * X_test_cond_feats[new_feat_name]
                          else: X_test_cond_feats[new_feat_name] = 0 # Default if feature missing in test
                     elif op == 'gt':
                          X_train_cond_feats[new_feat_name] = (X_train[feature] > threshold).astype(int)
+                         X_train_cond_feats[new_feat_name] = X_train[feature] * X_train_cond_feats[new_feat_name]
                          if feature in X_test.columns:
                               X_test_cond_feats[new_feat_name] = (X_test[feature] > threshold).astype(int)
+                              X_test_cond_feats[new_feat_name] = X_test[feature] * X_test_cond_feats[new_feat_name]
                          else: X_test_cond_feats[new_feat_name] = 0
 
                     condition_feature_map[new_feat_name] = condition_tuple
@@ -2712,13 +3324,14 @@ else:
 
     if interaction_pairs:
         # Use a sample of training data for H-stat calculation for speed
-        h_stat_sample_size = min(100, len(X_train)) # Sample size for H-stat
-        X_sample_h = X_train.sample(h_stat_sample_size, random_state=RANDOM_STATE) if h_stat_sample_size < len(X_train) else X_train
-        print(f"Calculating H-statistic on a sample of {len(X_sample_h)} training rows.")
+        # h_stat_sample_size = min(100, len(X_train)) # Sample size for H-stat
+        # X_sample_h = X_train.sample(h_stat_sample_size, random_state=RANDOM_STATE) if h_stat_sample_size < len(X_train) else X_train
+        X_sample_h = X_train # Use full X_train
+        print(f"Calculating H-statistic on the full training data ({len(X_sample_h)} rows).")
 
         h_calc_count = 0
         for i, (f1, f2) in enumerate(interaction_pairs):
-            print(f"  Calculating H for ({f1}, {f2}) - Pair {i+1}/{len(interaction_pairs)}", end='\r')
+            print(f"  Calculating H for ({f1}, {f2}) - Pair {i+1}/{len(interaction_pairs)}")
             # Pass reduced grid resolution and sample size
             h = friedman_h_statistic(surrogate_model, X_sample_h, f1, f2, grid_resolution=15) # Use defined function
             if not np.isnan(h):
@@ -2769,7 +3382,7 @@ else:
         bootstrap_h_stats = {pair: [] for pair in top_pairs_for_stability}
 
         for i in range(N_BOOTSTRAP_SAMPLES):
-            print(f"  Bootstrap sample {i+1}/{N_BOOTSTRAP_SAMPLES}", end='\r')
+            print(f"  Bootstrap sample {i+1}/{N_BOOTSTRAP_SAMPLES}")
             X_boot, y_boot = resample(X_train, y_train, random_state=RANDOM_STATE + i) # Resample with replacement
 
             # Option 1: Use original model on bootstrap sample (faster approximation)
@@ -2836,13 +3449,14 @@ else:
     else:
         h_3way_results_list = []
         # Use a smaller sample for 3-way calculation
-        h_3way_sample_size = min(50, len(X_train)) # Sample size for 3-way H
-        X_sample_3way = X_train.sample(h_3way_sample_size, random_state=RANDOM_STATE + 10) if h_3way_sample_size < len(X_train) else X_train
-        print(f"Calculating 3-way H on sample size: {len(X_sample_3way)}")
+        # h_3way_sample_size = min(50, len(X_train)) # Sample size for 3-way H
+        # X_sample_3way = X_train.sample(h_3way_sample_size, random_state=RANDOM_STATE + 10) if h_3way_sample_size < len(X_train) else X_train
+        X_sample_3way = X_train # Use full X_train
+        print(f"Calculating 3-way H on the full training data: {len(X_sample_3way)}")
 
         for i, triplet in enumerate(triplet_combinations):
             f1, f2, f3 = triplet
-            print(f"  Calculating for triplet {i+1}/{len(triplet_combinations)}: ({f1}, {f2}, {f3})", end='\r')
+            print(f"  Calculating for triplet {i+1}/{len(triplet_combinations)}: ({f1}, {f2}, {f3})")
             # Pass reduced grid resolution and sample
             h_3way = friedman_h_3way(surrogate_model, X_sample_3way, f1, f2, f3, grid_resolution=8) # Use defined function
 
@@ -3098,6 +3712,140 @@ else:
 report_generator.add_granger_causality_summary(granger_p_values, GRANGER_MAX_LAG)
 # Store in main dict
 report_generator.results_dict['granger_causality_feature_to_target_p_values'] = granger_p_values
+
+# %% [markdown]
+# ### 12.3 Condition Granger Causality (Condition Feature -> Target)
+
+# %%
+print("\n--- 8c. Running Granger Causality Tests (Condition Feature -> Target) ---")
+GRANGER_MAX_LAG = 3 # Use the same lag as for original features
+condition_granger_p_values = None # Initialize
+
+# Check if condition features were created and are not empty
+if 'X_train_cond_feats' in locals() and isinstance(X_train_cond_feats, pd.DataFrame) and not X_train_cond_feats.empty:
+    condition_feature_names_list = list(X_train_cond_feats.columns)
+    print(f"Testing {len(condition_feature_names_list)} condition features...")
+    try:
+        # Call the helper function using condition features
+        condition_granger_p_values = perform_granger_causality(
+            data_features=X_train_cond_feats, # Use condition features DataFrame
+            data_target=y_train,
+            feature_names=condition_feature_names_list, # Pass the list of names
+            max_lag=GRANGER_MAX_LAG
+        )
+
+        if condition_granger_p_values is not None and not condition_granger_p_values.isnull().all():
+            # Visualize p-values
+            condition_granger_plot_data = condition_granger_p_values.dropna().reset_index()
+            condition_granger_plot_data.columns = ['Condition_Feature', 'P_Value']
+            condition_granger_plot_data = condition_granger_plot_data.sort_values('P_Value')
+
+            fig_condition_granger = px.bar(condition_granger_plot_data, x='Condition_Feature', y='P_Value',
+                                           title=f'Granger Causality (Condition Feat -> {TARGET_VARIABLE}) P-Values (Lag {GRANGER_MAX_LAG})',
+                                           labels={'P_Value': 'P-Value', 'Condition_Feature': 'Condition Feature'})
+            fig_condition_granger.add_hline(y=0.05, line_dash="dash", line_color="red", annotation_text="p=0.05")
+            max_p_val = condition_granger_plot_data['P_Value'].max() if not condition_granger_plot_data.empty else 0.1
+            fig_condition_granger.update_layout(yaxis_range=[0, max(0.1, max_p_val * 1.1)])
+            fig_condition_granger.update_layout(xaxis_tickangle=-60) # Adjust angle if needed
+            save_plot(fig_condition_granger, "causality_condition_granger_bar", output_dir=OUTPUT_DIR)
+            print("Saved Granger Causality bar chart for condition features.")
+            print("\nCondition Granger Causality Results (Sorted by p-value):")
+            print(condition_granger_plot_data)
+        else:
+            print("Condition Granger Causality analysis yielded no valid results.")
+            if condition_granger_p_values is None: condition_granger_p_values = pd.Series(dtype=float)
+
+    except Exception as e:
+        import traceback
+        print(f"Error during Condition Granger Causality analysis: {e}")
+        condition_granger_p_values = pd.Series(dtype=float)
+else:
+    print("No condition features generated (or DataFrame is empty). Skipping Condition Granger Causality.")
+    condition_granger_p_values = pd.Series(dtype=float) # Ensure empty series
+
+# Add to report and results dictionary
+report_generator.results_dict['condition_feature_map'] = condition_feature_map # Ensure map is available for reporting
+report_generator.add_condition_granger_causality_summary(condition_granger_p_values, GRANGER_MAX_LAG)
+
+
+# %% [markdown]
+# ## 13. Temporal Feature Importance Analysis
+
+# %%
+print("\n--- 9. Temporal Feature Importance Analysis ---")
+temporal_importance_data = []
+temporal_plot_features = []
+
+# Define parameters for the analysis
+WINDOW_SIZE = 12  # Number of periods per window
+STEP_SIZE = 1     # How many periods to slide the window
+
+# Ensure train data is suitable
+if isinstance(X_train, pd.DataFrame) and isinstance(X_train.index, pd.DatetimeIndex) and len(X_train) > WINDOW_SIZE:
+    try:
+        temporal_importance_data = analyze_temporal_importance(
+            X=X_train, # Use training data
+            y=y_train,
+            feature_names=features,
+            window_size=WINDOW_SIZE
+        )
+
+        if temporal_importance_data:
+            # Process results into a DataFrame for plotting
+            plot_data_list = []
+            for item in temporal_importance_data:
+                # Get the timestamp corresponding to the end of the window
+                try:
+                    # Use end_idx - 1 to get the last date within the window
+                    window_date = X_train.index[item['end_idx'] - 1]
+                except IndexError:
+                    print(f"Warning: Could not get timestamp for end_idx {item['end_idx']}. Skipping window.")
+                    continue
+                except KeyError:
+                    print(f"Warning: Key 'end_idx' not found in item: {item}. Skipping window.")
+                    continue
+
+                # Convert Series to dictionary for this window
+                importance_dict = item['importance'].to_dict()
+                importance_dict['window_end_date'] = window_date # Add the correct date
+                plot_data_list.append(importance_dict)
+
+            if not plot_data_list:
+                print("Temporal importance analysis processing yielded no valid data points.")
+            else:
+                temporal_plot_df = pd.DataFrame(plot_data_list)
+                # Check if 'window_end_date' column exists before setting index
+                if 'window_end_date' in temporal_plot_df.columns:
+                    temporal_plot_df = temporal_plot_df.set_index('window_end_date')
+                    temporal_plot_df = temporal_plot_df.sort_index()
+
+                    # Select top N features based on mean importance across all windows
+                    mean_temporal_imp = temporal_plot_df.mean().sort_values(ascending=False)
+                    N_TOP_TEMPORAL = 10 # Number of top features to plot
+                    temporal_plot_features = mean_temporal_imp.head(N_TOP_TEMPORAL).index.tolist()
+                    print(f"Plotting temporal importance for top {N_TOP_TEMPORAL} features (avg across windows): {temporal_plot_features}")
+
+                    # Create plot
+                    fig_temporal = px.line(temporal_plot_df[temporal_plot_features],
+                                           title='Feature Importance (MDI) Over Time (Sliding Window on Train Data)',
+                                           labels={'value': 'Importance (MDI)', 'window_end_date': 'Window End Date', 'variable': 'Feature'})
+                    fig_temporal.update_layout(legend_title_text='Feature')
+                    save_plot(fig_temporal, "temporal_importance_trends", output_dir=OUTPUT_DIR)
+                    print("Saved temporal importance trend plot.")
+                else:
+                    print("Error: 'window_end_date' column not found after processing temporal data.")
+        else:
+            print("Temporal importance analysis did not produce results.")
+    except Exception as e:
+        import traceback
+        print(f"Error during Temporal Importance analysis: {e}")
+        # print(traceback.format_exc())
+else:
+    print("Skipping temporal importance analysis: X_train is not a DataFrame, has no DatetimeIndex, or is too short.")
+
+# Add summary to report
+report_generator.add_temporal_importance_summary(temporal_importance_data, temporal_plot_features)
+
 
 # %% [markdown]
 # ## 13. Interpretability Summary Plots (SHAP Force Plot)
@@ -3419,3 +4167,6 @@ report_generator.generate_markdown_report(filename="SAFE_Analysis_Report.md")
 # %%
 print("\n--- Workflow Complete ---")
 print(f"All outputs saved in directory: {OUTPUT_DIR}")
+
+
+# %%

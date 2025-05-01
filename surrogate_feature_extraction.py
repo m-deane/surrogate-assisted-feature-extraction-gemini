@@ -41,6 +41,8 @@ import graphviz
 from sklearn import tree as _tree
 import itertools
 from tqdm import tqdm
+from scipy.stats import randint
+from sklearn.model_selection import RandomizedSearchCV
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -272,15 +274,55 @@ print(f"Testing set size: {X_test.shape[0]} samples")
 print("\nPerforming initial feature importance assessment...")
 
 # Train the surrogate model
-print("Training the surrogate model (Gradient Boosting Regressor)...")
-surrogate_model = GradientBoostingRegressor(
-    n_estimators=200,
-    max_depth=3,
-    learning_rate=0.1,
-    loss='squared_error',
-    random_state=42
+print("Training the surrogate model (Random Forest Regressor)...")
+
+best_params = {}
+
+# Define search spaces
+rf_param_dist = {
+    'n_estimators': randint(50, 200),
+    'max_depth': randint(3, 15),
+    'min_samples_leaf': randint(5, 20),
+    'max_features': ['sqrt', 'log2', 0.5, 0.7, 0.9] # Include float options
+}
+
+# Define TimeSeriesSplit for CV within RandomizedSearch
+# Ensure enough splits are possible given the sub-training data size
+n_val = 5
+n_splits_tuning = min(3, len(X_train) // (n_val or 1)) # Ensure n_val is not 0
+if len(X_train) < 2 * n_splits_tuning or n_splits_tuning < 2:
+    print(f"Warning: Sub-training data size ({len(X_train)}) is too small for {n_splits_tuning} TimeSeriesSplits. Adjusting splits or skipping CV.")
+    n_splits_tuning = 2 if len(X_train) >= 4 else 1 # Fallback to 2 splits if possible, or 1 (no CV)
+
+if n_splits_tuning > 1:
+    cv_tuning = TimeSeriesSplit(n_splits=n_splits_tuning)
+else:
+    cv_tuning = None # Cannot perform CV
+    print("Warning: CV disabled in RandomizedSearchCV due to small sub-training set size.")
+
+n_iter_search = 50 # Number of parameter settings that are sampled
+model_to_tune = RandomForestRegressor(random_state=42, n_jobs=-1, oob_score=False) # OOB doesn't work well with CV split
+search = RandomizedSearchCV(
+    estimator=model_to_tune,
+    param_distributions=rf_param_dist,
+    n_iter=n_iter_search,
+    cv=cv_tuning,
+    scoring='neg_root_mean_squared_error', # Lower RMSE is better (higher neg_rmse)
+    n_jobs=-1,
+    random_state=42,
+    verbose=1 # Show progress
 )
-surrogate_model.fit(X_train, y_train)
+search.fit(X_train, y_train) # Fit on the sub-training set
+best_params = search.best_params_
+print(f"\nBest RandomForest params found: {best_params}")
+# Re-enable OOB score for the final model if desired
+final_params = best_params.copy()
+final_params['oob_score'] = True
+final_params['random_state'] = 42
+final_params['n_jobs'] = -1
+
+surrogate_model_spec = RandomForestRegressor(**final_params)
+surrogate_model = surrogate_model_spec.fit(X_train, y_train)
 
 # Enhance the feature importance calculation with LOFO (Leave One Feature Out)
 def calculate_feature_importance(model, X_train, X_test, y_test):
@@ -2063,7 +2105,7 @@ plt.figtext(0.5, 0.01, explanation_text, ha='center', fontsize=10,
             bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
 
 plt.tight_layout()
-plt.subplots_adjust(bottom=0.35)
+# plt.subplots_adjust(bottom=0.35)
 plt.savefig('three_way_h_statistics.png')
 print("Three-way H-statistics plot saved as 'three_way_h_statistics.png'")
 
@@ -2205,41 +2247,45 @@ for (feat1, feat2), h_stat in interaction_strengths.items():
             'H-statistic': h_stat
         })
 
-# Convert to DataFrame and sort by interaction strength
-summary_df = pd.DataFrame(summary_data).sort_values('H-statistic', ascending=False)
-
-# Create a summary visualization
-plt.figure(figsize=(15, 10))
-plt.bar(
-    range(len(summary_df)),
-    summary_df['H-statistic'],
-    alpha=0.8
-)
-
-# Create labels
-labels = [f"{row['Feature 1'][:10]}...\nvs\n{row['Feature 2'][:10]}..." 
-          for _, row in summary_df.iterrows()]
-plt.xticks(range(len(summary_df)), labels, rotation=90)
-plt.ylabel('Friedman H-statistic')
-plt.title('Interaction Strength Summary for Significant Feature Pairs (H-statistic > 0.1)')
-
-# Add explanation text
-plt.figtext(0.5, 0.02,
-            "Interaction Strength Summary:\n" +
-            "• Only showing feature pairs with H-statistic > 0.1\n" +
-            "• Higher H-statistic values indicate stronger interactions\n" +
-            "• These pairs represent the most meaningful feature interactions in the model",
-            ha='center', fontsize=10,
-            bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
-
-plt.tight_layout()
-plt.subplots_adjust(bottom=0.2)
-plt.savefig('significant_pdp_interactions_summary.png')
-plt.close()
-
-print("\nInteraction strength summary for significant pairs:")
-print(summary_df)
-print("\nSummary visualization saved as 'significant_pdp_interactions_summary.png'")
+# Check if summary_data is empty before creating DataFrame and plotting
+if not summary_data:
+    print("No significant feature pairs (H-statistic > 0.1) found. Skipping summary visualization.")
+else:
+    # Convert to DataFrame and sort by interaction strength
+    summary_df = pd.DataFrame(summary_data).sort_values('H-statistic', ascending=False)
+    
+    # Create a summary visualization
+    plt.figure(figsize=(15, 10))
+    plt.bar(
+        range(len(summary_df)),
+        summary_df['H-statistic'],
+        alpha=0.8
+    )
+    
+    # Create labels
+    labels = [f"{row['Feature 1'][:10]}...\nvs\n{row['Feature 2'][:10]}..." 
+              for _, row in summary_df.iterrows()]
+    plt.xticks(range(len(summary_df)), labels, rotation=90)
+    plt.ylabel('Friedman H-statistic')
+    plt.title('Interaction Strength Summary for Significant Feature Pairs (H-statistic > 0.1)')
+    
+    # Add explanation text
+    plt.figtext(0.5, 0.02,
+                "Interaction Strength Summary:\n" +
+                "• Only showing feature pairs with H-statistic > 0.1\n" +
+                "• Higher H-statistic values indicate stronger interactions\n" +
+                "• These pairs represent the most meaningful feature interactions in the model",
+                ha='center', fontsize=10,
+                bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
+    
+    plt.tight_layout()
+    plt.subplots_adjust(bottom=0.2)
+    plt.savefig('significant_pdp_interactions_summary.png')
+    plt.close()
+    
+    print("\nInteraction strength summary for significant pairs:")
+    print(summary_df)
+    print("\nSummary visualization saved as 'significant_pdp_interactions_summary.png'")
 
 # ... continue with existing code ...
 
@@ -2365,7 +2411,6 @@ plt.figtext(0.5, 0.01, explanation_text, ha='center', fontsize=10,
             bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
 
 plt.tight_layout()
-plt.subplots_adjust(bottom=0.3)
 plt.savefig('three_way_pairwise_comparison.png')
 print("Three-way vs pairwise interaction comparison saved as 'three_way_pairwise_comparison.png'")
 
@@ -2548,7 +2593,8 @@ for triplet in tqdm(feature_triplets[:5], desc="Generating three-way PDP plots")
         )
         
         # Save the plot
-        filename = f"three_way_pdp_{'_'.join([t.split('_')[0] for t in triplet])}.png"
+        joined_triplet = '_'.join([t.split('_')[0] for t in triplet])
+        filename = f"three_way_pdp_{joined_triplet}.png"
         plt.savefig(filename, bbox_inches='tight', dpi=300)
         plt.close()
         
