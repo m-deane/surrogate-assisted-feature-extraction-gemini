@@ -6,10 +6,19 @@
 # It aims to analyze feature importance, interactions, and generate
 # interpretable insights from complex machine learning models using a surrogate.
 
-# %% [markdown]
-# ## 1. Imports and Setup
+"""TODO
+- fix rulefit analysis
+- shap interaction heatmap
+- fix feat condition importance lofo 'Y'
+- replace custom pdp plots
+- network plot
+- condition feature cond permutation
+- scatter plots
+"""
 
-# %%
+#%%1. Imports and Setup %% [markdown]
+
+
 # Standard library imports
 import os
 import json
@@ -54,33 +63,42 @@ import graphviz
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
-# %% [markdown]
-# ## 2. Configuration Constants
+#%% 2. Configuration [markdown]
 
-# %%
 # --- Configuration ---
+TRAIN_START = '2020-01-01'
+TRAIN_END = '2023-12-01'
+TEST_START = '2024-01-01'
+TEST_END = '2024-12-01'
+
 DATA_PATH = '_data/preem.csv'
 TARGET_VARIABLE = 'target'
 DATE_COLUMN = 'date'
 GROUPING_COLUMN =  None
 FILTER_VALUE = None
-TEST_MONTHS = 12
 SURROGATE_MODEL_TYPE = 'random_forest' # 'random_forest' or 'xgboost'
-N_TREES_TO_VISUALIZE = 3
+N_TREES_TO_VISUALIZE = 10
 N_TOP_FEATURES = 10
-N_BOOTSTRAP_SAMPLES = 5 # Reduced for speed
-OUTPUT_DIR = 'safe_analysis_notebook_output' # New output dir for this version
+N_BOOTSTRAP_SAMPLES = 10 # Reduced for speed
+OUTPUT_DIR = 'preem'
 EXOGENOUS_VARIABLES = 'all'  # Can be 'all' or a list of variable names
 RANDOM_STATE = 42
+
+MAX_DEPTH = 3
+N_ESTIMATORS = 25
+RULEFIT_MAX_RULES = 10
+N_TOP_CONDITIONS_TO_ANALYZE = 20 # How many top conditions to potentially turn into features
+
+# Define parameters for the TEMPORAL analysis
+WINDOW_SIZE = 12  # Number of periods per window
+STEP_SIZE = 3     # How many periods to slide the window
 
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Ensured output directory exists: {OUTPUT_DIR}")
 
-# %% [markdown]
-# ## 3. Report Generator Class Definition
+# %% 3. Report Generator Class Definition [markdown]
 
-# %%
 class ReportGenerator:
     """
     A class for generating comprehensive analysis reports using surrogate models.
@@ -560,7 +578,7 @@ class ReportGenerator:
                      content += f"- `{f1}` <> `{f2}`: {val:.4f}\n"
                      # Store consistently ordered pair
                      pair_key = tuple(sorted((f1,f2)))
-                     str_key = f'{pair_key[0]}_vs_{pair_key[1]}'
+                     str_key = f'{pair_key[0]}___x____{pair_key[1]}' # Use safer delimiter
                      if str_key not in top_shap_inters:
                           top_shap_inters[str_key] = val
                 self.results_dict['top_shap_interactions'] = top_shap_inters
@@ -710,7 +728,7 @@ class ReportGenerator:
         elif top_shap_interactions: # Fallback to SHAP if H failed/not available
              summary_text += "- Pairwise interactions assessed using Mean Absolute SHAP interaction values:\n"
              for pair_str, val in list(top_shap_interactions.items())[:3]: # Top 3 SHAP
-                 f1, f2 = pair_str.split('_vs_')
+                 f1, f2 = pair_str.split('___x___') # Use safer delimiter
                  summary_text += f"  - `{f1}` <> `{f2}` (Mean Abs SHAP Inter: {val:.4f})\n"
              key_findings_dict['top_shap_interactions'] = top_shap_interactions
         else:
@@ -993,10 +1011,8 @@ class ReportGenerator:
         print(f"Successfully saved detailed findings to: {filepath}")
 
 
-# %% [markdown]
-# ## 4. Helper Function Definitions
+# %% 4. Helper Function Definitions [markdown]
 
-# %%
 def save_plot(fig, filename, output_dir=OUTPUT_DIR):
     """Saves plotly figure as HTML and static image, or matplotlib fig as png."""
     if fig is None:
@@ -1059,7 +1075,71 @@ def save_plot(fig, filename, output_dir=OUTPUT_DIR):
     except Exception as e:
         print(f"Error saving plot {filename}: {e}")
 
-# %%
+def time_series_split(df: pd.DataFrame, train_start, train_end, test_start, test_end) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Splits a DataFrame into training and testing sets based on specified date ranges using the DatetimeIndex.
+
+    Args:
+        df: The input pandas DataFrame with a DatetimeIndex.
+        train_start: The start date for the training set (inclusive).
+                     Can be a datetime object or a string in 'YYYY-MM-DD' format.
+        train_end: The end date for the training set (inclusive).
+                   Can be a datetime object or a string in 'YYYY-MM-DD' format.
+        test_start: The start date for the test set (inclusive).
+                    Can be a datetime object or a string in 'YYYY-MM-DD' format.
+        test_end: The end date for the test set (inclusive).
+                  Can be a datetime object or a string in 'YYYY-MM-DD' format.
+
+    Returns:
+        A tuple containing two DataFrames: (train_df, test_df).
+
+    Raises:
+        ValueError: If the DataFrame index is not a DatetimeIndex.
+        TypeError: If start/end date arguments are not datetime objects or
+                   valid 'YYYY-MM-DD' strings.
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("DataFrame index must be a DatetimeIndex for time series split.")
+
+    # Ensure data is sorted by time index (optional, but good practice)
+    df = df.sort_index()
+
+    # Helper function to convert input dates
+    def _parse_date(date_input, arg_name):
+        if isinstance(date_input, str):
+            try:
+                return pd.to_datetime(date_input)
+            except ValueError:
+                raise TypeError(f"{arg_name} must be a datetime object or a valid 'YYYY-MM-DD' string, got '{date_input}'")
+        elif isinstance(date_input, datetime):
+            # Handle timezone consistency if index has timezone
+            idx_tz = df.index.tz
+            if idx_tz is not None and date_input.tzinfo is None:
+                 print(f"Warning: DataFrame index has timezone {idx_tz}, but {arg_name} is timezone-naive.")
+                 # Optionally convert input to index timezone: return date_input.replace(tzinfo=idx_tz)
+                 # Or make index naive: df.index = df.index.tz_localize(None) before comparison
+            elif idx_tz is None and date_input.tzinfo is not None:
+                 print(f"Warning: DataFrame index is timezone-naive, but {arg_name} has timezone {date_input.tzinfo}.")
+                 # Optionally make input naive: return date_input.replace(tzinfo=None)
+            return pd.to_datetime(date_input) # Use pd.to_datetime for consistency
+        else:
+            raise TypeError(f"{arg_name} must be a datetime object or a string, got {type(date_input)}")
+
+    # Parse all date arguments
+    train_start_dt = _parse_date(train_start, "train_start")
+    train_end_dt = _parse_date(train_end, "train_end")
+    test_start_dt = _parse_date(test_start, "test_start")
+    test_end_dt = _parse_date(test_end, "test_end")
+
+    # Filter data based on index and parsed dates
+    train_mask = (df.index >= train_start_dt) & (df.index <= train_end_dt)
+    test_mask = (df.index >= test_start_dt) & (df.index <= test_end_dt)
+
+    train_df = df.loc[train_mask]
+    test_df = df.loc[test_mask]
+
+    return train_df, test_df
+
 def time_series_split_by_month(df, date_col_name, test_months):
     """Splits time series data based on the last N months using the DataFrame index."""
     if not isinstance(df.index, pd.DatetimeIndex):
@@ -1100,7 +1180,6 @@ def time_series_split_by_month(df, date_col_name, test_months):
 
     return train_df, test_df
 
-# %%
 def get_tree_rules_and_conditions(tree_model, feature_names):
     """Extracts conditions (feature-threshold pairs) from all trees in a RandomForest."""
     conditions = Counter()
@@ -1151,7 +1230,6 @@ def get_tree_rules_and_conditions(tree_model, feature_names):
     print(f"Finished extracting conditions. Total conditions counted: {extracted_count}")
     return conditions, all_rules_text
 
-# %%
 def friedman_h_statistic(model, X, feature1, feature2, grid_resolution=15, sample_size=None):
     """(Approximation) Calculates Friedman's H-statistic for pairwise interaction."""
     feature_names = X.columns.tolist()
@@ -1233,7 +1311,6 @@ def friedman_h_statistic(model, X, feature1, feature2, grid_resolution=15, sampl
         # print(f"Error calculating H-statistic for ({feature1}, {feature2}): {e}\n{traceback.format_exc()}")
         return np.nan # Return NaN if calculation fails
 
-# %%
 def friedman_h_3way(model, X, feature1, feature2, feature3, grid_resolution=8, sample_size=None):
     """(Approximation) Calculates Friedman's H-statistic for three-way interaction."""
     feature_names = X.columns.tolist()
@@ -1351,7 +1428,6 @@ def friedman_h_3way(model, X, feature1, feature2, feature3, grid_resolution=8, s
         # print(f"Error calculating 3-way H-statistic for ({feature1}, {feature2}, {feature3}): {e}\n{traceback.format_exc()}")
         return np.nan
 
-# %%
 def create_interaction_pdp(surrogate_model, X_train, features, feature_names=None, grid_resolution=20):
     """Create detailed partial dependence interaction plots using Matplotlib."""
     if feature_names is None:
@@ -1521,7 +1597,6 @@ def create_interaction_pdp(surrogate_model, X_train, features, feature_names=Non
 
     return fig, interaction_strength
 
-# %%
 def perform_granger_causality(data_features, data_target, feature_names, max_lag, test='ssr_ftest'):
     """Performs Granger causality tests for each feature predicting the target."""
     if not isinstance(data_target, pd.Series):
@@ -1586,8 +1661,8 @@ def perform_granger_causality(data_features, data_target, feature_names, max_lag
 
     print("Granger Causality tests complete.")
     return p_values
-# %%
-def analyze_temporal_importance(X, y, feature_names, window_size=10):
+
+def analyze_temporal_importance(X, y, feature_names, window_size, surrogate_model):
     """Analyze how feature importance changes over time"""
     # Ensure X and y are pandas objects with indices
     if not isinstance(X, pd.DataFrame):
@@ -1617,13 +1692,7 @@ def analyze_temporal_importance(X, y, feature_names, window_size=10):
         
         # Fit model on window
         try:
-            window_model = RandomForestRegressor( # Use RandomForest instead
-                n_estimators=30, # Fewer trees for speed
-                max_depth=5,     # Limit depth
-                min_samples_leaf=5, # Min samples
-                random_state=RANDOM_STATE + i, # Vary state slightly per window
-                n_jobs=-1 # Use available cores
-            ).fit(X_window, y_window)
+            window_model = surrogate_model.fit(X_window, y_window)
             
             # Calculate feature importance (MDI for RF)
             if hasattr(window_model, 'feature_importances_'):
@@ -2010,10 +2079,8 @@ def plot_interaction_network(interaction_df, feature_importance, threshold=0.01)
     plt.savefig('interaction_network.png', bbox_inches='tight')
     return G
 
-# %% [markdown]
-# ## 5. Initialization
+# %% 5. Initialization [markdown]
 
-# %%
 # Instantiate Report Generator
 report_generator = ReportGenerator(output_dir=OUTPUT_DIR, surrogate_model_type=SURROGATE_MODEL_TYPE)
 
@@ -2041,13 +2108,8 @@ engineered_feature_names = []
 shap_values = None # To store raw SHAP values object
 explainer = None # To store SHAP explainer
 
-# %% [markdown]
-# ## 6. Data Loading and Preparation
+# %% 6. Data Loading and Preparation [markdown]
 
-# %% [markdown]
-# ### 6.1 Load Data
-
-# %%
 print("\n--- 1. Loading Data ---")
 try:
     df = pd.read_csv(DATA_PATH)
@@ -2061,12 +2123,7 @@ except Exception as e:
     print(f"Error loading data: {e}")
     exit()
 
-# %% [markdown]
-# ### 6.2 Prepare Data
-
-# %%
 print("\n--- 2. Preparing Data ---")
-# a. Time Index
 try:
     if DATE_COLUMN not in df.columns:
         raise ValueError(f"Date column '{DATE_COLUMN}' not found in the dataset.")
@@ -2111,7 +2168,7 @@ if TARGET_VARIABLE not in df.columns:
     print(f"Error: Target variable '{TARGET_VARIABLE}' not found in the DataFrame columns: {df.columns.tolist()}")
     exit()
 
-# Drop rows with NaN in target variable BEFORE splitting
+# d.Drop rows with NaN in target variable BEFORE splitting
 initial_rows = df.shape[0]
 df.dropna(subset=[TARGET_VARIABLE], inplace=True)
 print(f"Dropped {initial_rows - df.shape[0]} rows with NaN target: {df.shape[0]} rows remaining.")
@@ -2129,14 +2186,15 @@ else:
 
 print(f"Identified Features ({len(features)}): {features}")
 print(f"Target Variable: {TARGET_VARIABLE}")
+
 # Set feature_names and target_name in the report generator instance
 report_generator.feature_names = features
 report_generator.target_name = TARGET_VARIABLE
 
-
-# d. Time Series Split
+# e. Time Series Split
 try:
-    train_df, test_df = time_series_split_by_month(df, DATE_COLUMN, TEST_MONTHS)
+    # Use index for splitting now
+    train_df, test_df = time_series_split(df, TRAIN_START, TRAIN_END, TEST_START, TEST_END)
 except ValueError as ve:
      print(f"Error during time series split: {ve}")
      exit()
@@ -2154,7 +2212,7 @@ if train_df.empty or test_df.empty:
 X_train, y_train = train_df[features], train_df[TARGET_VARIABLE]
 X_test, y_test = test_df[features], test_df[TARGET_VARIABLE]
 
-# e. Handle potential NaNs in features (impute AFTER splitting)
+# f. Handle potential NaNs in features (impute AFTER splitting)
 print("Handling NaNs in features (using mean imputation)...")
 imputation_values = {}
 for col in features:
@@ -2187,21 +2245,15 @@ report_generator.y_test = y_test
 print(f"Train shapes: X={X_train.shape}, y={y_train.shape}")
 print(f"Test shapes:  X={X_test.shape}, y={y_test.shape}")
 
-# %% [markdown]
-# ### 6.3 Add Dataset Overview to Report
-
-# %%
 report_generator.add_dataset_overview(
     df_shape=df.shape, # Use shape of df AFTER filtering and NaN drop
     features_list=features,
     date_range=(df.index.min(), df.index.max())
 )
 
-# %% [markdown]
-# ## 7. Surrogate Model Training & Evaluation
+# %% 7. Surrogate Model Training & Evaluation [markdown]
 
-# %%
-print("\n--- 4. Surrogate Model Training ---")
+print("\n--- 7 Surrogate Model Training ---")
 print(f"Training {SURROGATE_MODEL_TYPE} model...")
 
 # Split the training data further for hyperparameter tuning and early stopping
@@ -2211,7 +2263,7 @@ X_train_sorted = X_train.sort_index()
 y_train_sorted = y_train.sort_index()
 
 n_train_total = len(X_train_sorted)
-n_val = int(n_train_total * 0.20) # 20% for validation
+n_val = int(n_train_total * 0.40) # 20% for validation
 n_train_sub = n_train_total - n_val
 
 if n_train_sub < 1 or n_val < 1:
@@ -2227,7 +2279,7 @@ else:
     y_val = y_train_sorted.iloc[n_train_sub:]
     print(f"Split training data: Sub-Train={X_train_sub.shape}, Validation={X_val.shape}")
 
-print("\n--- 4. Surrogate Model Training (with Hyperparameter Tuning) ---")
+print("\n--- 7. Surrogate Model Training (with Hyperparameter Tuning) ---")
 
 if skip_tuning:
     print("Skipping hyperparameter tuning due to small dataset size.")
@@ -2247,14 +2299,14 @@ else:
 
     # Define search spaces
     rf_param_dist = {
-        'n_estimators': randint(50, 200),
-        'max_depth': randint(3, 15),
+        'n_estimators': randint(10, N_ESTIMATORS),
+        'max_depth': randint(1, MAX_DEPTH),
         'min_samples_leaf': randint(5, 20),
         'max_features': ['sqrt', 'log2', 0.5, 0.7, 0.9] # Include float options
     }
 
     xgb_param_dist = {
-        'n_estimators': randint(50, 300),
+        'n_estimators': randint(10, N_ESTIMATORS),
         'max_depth': randint(3, 10),
         'learning_rate': uniform(0.01, 0.2), # learning_rate range [0.01, 0.21]
         'subsample': uniform(0.6, 0.4),     # subsample range [0.6, 1.0]
@@ -2300,7 +2352,7 @@ else:
         final_params['oob_score'] = True
         final_params['random_state'] = RANDOM_STATE
         final_params['n_jobs'] = -1
-        surrogate_model = RandomForestRegressor(**final_params)
+        surrogate_model_spec = RandomForestRegressor(**final_params)
 
 
     elif SURROGATE_MODEL_TYPE == 'xgboost':
@@ -2340,7 +2392,7 @@ else:
         final_params['objective'] = 'reg:squarederror'
         final_params['random_state'] = RANDOM_STATE
         final_params['n_jobs'] = -1
-        surrogate_model = xgb.XGBRegressor(**final_params)
+        surrogate_model_spec = xgb.XGBRegressor(**final_params)
 
     else:
         raise ValueError("Invalid SURROGATE_MODEL_TYPE. Choose 'xgboost' or 'random_forest'.")
@@ -2352,7 +2404,7 @@ else:
 print(f"\nFitting final {SURROGATE_MODEL_TYPE} model with best parameters on the full training set...")
 try:
     # Fit the surrogate_model (instantiated with best params or defaults) on the original X_train, y_train
-    surrogate_model.fit(X_train, y_train)
+    surrogate_model = surrogate_model_spec.fit(X_train, y_train)
 except Exception as fit_e:
     print(f"Error fitting final surrogate model: {fit_e}")
     exit()
@@ -2384,14 +2436,10 @@ report_generator.add_surrogate_model_performance(
 # Store best params in results dict
 report_generator.results_dict['best_surrogate_params'] = best_params
 
-# %% [markdown]
-# ## 8. Surrogate Model Interpretation - Rules & Thresholds
-
-# %% [markdown]
+# %% 8. Surrogate Model Interpretation - Rules & Thresholds [markdown]
 # ### 8.1 Decision Tree Visualization & Condition Extraction (Random Forest)
 
-# %%
-print("\n--- 5. Surrogate Model Interpretation - Rules & Thresholds ---")
+print("\n--- 8. Surrogate Model Interpretation - Rules & Thresholds ---")
 rule_conditions = Counter() # Initialize
 example_rules_text = [] # Initialize
 
@@ -2431,7 +2479,6 @@ if SURROGATE_MODEL_TYPE == 'random_forest':
 elif SURROGATE_MODEL_TYPE == 'xgboost':
     print("Visualizing XGBoost Tree (requires graphviz)...")
     try:
-        import graphviz # Check import here
         booster = surrogate_model.get_booster()
         for i in range(min(N_TREES_TO_VISUALIZE, booster.num_boosted_rounds())):
              try:
@@ -2448,10 +2495,7 @@ elif SURROGATE_MODEL_TYPE == 'xgboost':
         print(f"Error preparing for XGBoost tree visualization: {e}")
     print("Rule/condition extraction (counting thresholds) currently implemented only for RandomForest.")
 
-# %% [markdown]
 # ### 8.2 Feature Threshold Analysis (Random Forest)
-
-# %%
 if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
     print("\nAnalyzing Feature Thresholds (Unique per feature from Condition Analysis)...")
     feature_thresholds = {}
@@ -2475,8 +2519,6 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
             except Exception as parse_e:
                  print(f"Warning: Error parsing condition {condition_tuple}: {parse_e}")
                  continue
-        # else:
-            # print(f"Warning: Skipping condition with unexpected format: {condition_tuple}")
 
     print(f"Successfully parsed {parsed_conditions} conditions to extract thresholds.")
 
@@ -2491,6 +2533,7 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
         save_plot(fig_thresh, "surrogate_threshold_counts", output_dir=OUTPUT_DIR)
         print("Unique Threshold Counts per Feature (Top 15):")
         print(threshold_df.head(15))
+        threshold_df.to_csv(os.path.join(OUTPUT_DIR, "surrogate_threshold_counts.csv"), index=True)
         # Store in results
         report_generator.results_dict['threshold_counts'] = threshold_df.to_dict()['Count']
     else:
@@ -2499,14 +2542,10 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
 elif SURROGATE_MODEL_TYPE == 'random_forest':
      print("Rule conditions not available, skipping threshold analysis.")
 
-# %% [markdown]
-# ## 9. Feature Importance Analysis
+# %% 9. Feature Importance Analysis [markdown]
+# ### 9.1 Permutation Importance (Train Set) - (example workflow -> report generator)
 
-# %% [markdown]
-# ### 9.1 Permutation Importance (Train Set)
-
-# %%
-print("\n--- 6a. Calculating Permutation Importance (Train Set) ---")
+print("\n--- 9.1 Calculating Permutation Importance (Train Set) ---")
 perm_df = None # Initialize
 try:
     print("Calculating permutation importance (this may take a while)...")
@@ -2514,7 +2553,7 @@ try:
     perm_importance = permutation_importance(
         surrogate_model,
         X_train, y_train,
-        n_repeats=10,        # Number of times to permute each feature
+        n_repeats=20,        # Number of times to permute each feature
         random_state=RANDOM_STATE,
         n_jobs=-1,           # Use all available cores
         scoring='neg_root_mean_squared_error' # Use RMSE drop as score (higher is better)
@@ -2550,10 +2589,7 @@ except Exception as e:
 # Store results
 report_generator.results_dict['permutation_importance_train'] = perm_df
 
-# %% [markdown]
-# ### 9.2 LOFO Importance (Train Set)
-
-# %%
+# %% 9.3 LOFO Importance (Train Set) [markdown]
 print("\n--- 6b. Calculating LOFO Importance (Train Set) ---")
 lofo_df = None # Initialize
 try:
@@ -2565,7 +2601,10 @@ try:
         print("Warning: Train data too small for reliable TimeSeriesSplit in LOFO. Skipping.")
         raise ValueError("Insufficient data for LOFO CV.")
 
-    cv_lofo = TimeSeriesSplit(n_splits=n_splits_lofo)
+    # cv_lofo = TimeSeriesSplit(n_splits=n_splits_lofo)
+    # Use KFold for cross-validation as condition features are not time-series dependent in isolation
+    cv_lofo_ = KFold(n_splits=n_splits_lofo, shuffle=True, random_state=42) 
+
     # Combine X_train and y_train for LOFO Dataset input
     lofo_input_df = pd.concat([X_train, y_train], axis=1)
     lofo_dataset = Dataset(df=lofo_input_df, target=TARGET_VARIABLE, features=features)
@@ -2573,7 +2612,7 @@ try:
     print(f"Running LOFOImportance with {n_splits_lofo} time series splits...")
     # Use a cloned model to avoid modifying the original
     lofo_model = clone(surrogate_model)
-    lofo_imp = LOFOImportance(lofo_dataset, model=lofo_model, cv=cv_lofo, scoring='r2') # Use R2 score
+    lofo_imp = LOFOImportance(lofo_dataset, model=lofo_model, cv=cv_lofo, scoring='neg_root_mean_squared_error') # Use R2 score
     lofo_df_raw = lofo_imp.get_importance()
     print(f"LOFO Raw Results:\n{lofo_df_raw}")
 
@@ -2622,10 +2661,7 @@ except Exception as e:
 # Store results
 report_generator.results_dict['lofo_importance_train'] = lofo_df
 
-# %% [markdown]
-# ### 9.3 RuleFit Analysis (Train Set)
-
-# %%
+# %% 10. RuleFit Analysis (Train Set) [markdown] -------- TODO
 print("\n--- 6c. Rule Extraction with imodels (RuleFit) ---")
 rulefit_rules_df = None # Initialize
 try:
@@ -2633,7 +2669,7 @@ try:
     # Initialize and fit RuleFitRegressor
     # Consider adjusting hyperparameters like max_rules, tree_size, tree_depth etc.
     # Using default hyperparameters first. Ensure data is numpy array.
-    rulefit = RuleFitRegressor(random_state=RANDOM_STATE, max_rules=10) # Limit max rules
+    rulefit = RuleFitRegressor(random_state=RANDOM_STATE, max_rules=RULEFIT_MAX_RULES) # Limit max rules
     # Convert to numpy, handle potential errors
     try:
          X_train_np = X_train.values
@@ -2716,11 +2752,9 @@ except Exception as e:
 # Store results (potentially empty DF)
 report_generator.results_dict['rulefit_rules_df'] = rulefit_rules_df
 
-# %% [markdown]
-# ### 9.4 SHAP Importance & Interaction Analysis (Train Set)
+# %% 11. SHAP Importance & Interaction Analysis (Train Set) [markdown]
 
-# %%
-print("\n--- 6d/e. Calculating SHAP Importance & Interactions (Train Set) ---")
+print("\n--- 11. Calculating SHAP Importance & Interactions (Train Set) ---")
 shap_values = None # Raw SHAP values object
 shap_df = None # Importance DataFrame
 shap_interaction_values = None # Raw interaction values object
@@ -2810,13 +2844,11 @@ except Exception as e:
 report_generator.results_dict['shap_importance_train'] = shap_df
 report_generator.results_dict['shap_interaction_values_train'] = shap_interaction_df # Store the matrix DF
 
-# %% [markdown]
-# ### 9.5 MDI Importance (if applicable)
+# %% 12. MDI Importance (if applicable) [markdown]
 
-# %%
 mdi_df = None # Initialize
 if hasattr(surrogate_model, 'feature_importances_'):
-    print("\n--- 6f. Calculating MDI Importance ---")
+    print("\n--- 12. Calculating MDI Importance ---")
     try:
         mdi_importances = surrogate_model.feature_importances_
         mdi_df = pd.DataFrame({'feature': features, 'mdi_importance': mdi_importances})
@@ -2841,11 +2873,9 @@ else:
 # Store results
 report_generator.results_dict['mdi_importance'] = mdi_df
 
-# %% [markdown]
-# ### 9.6 Combined Importance Ranking
+# %% 13. Combined Importance Ranking [markdown]
 
-# %%
-print("\n--- Calculating Combined Importance Rankings ---")
+print("\n--- 13. Calculating Combined Importance Rankings ---")
 all_imp = {}
 # Add results if they exist and are DataFrames with correct structure
 if perm_df is not None and isinstance(perm_df, pd.DataFrame) and 'feature' in perm_df.columns and 'importance_mean' in perm_df.columns and not perm_df.empty:
@@ -2902,14 +2932,9 @@ report_generator.results_dict['combined_imp'] = combined_imp
 # Add summary of top features to report (uses SHAP and Combined)
 report_generator.add_feature_importance_summary(shap_df, combined_imp)
 
-# %% [markdown]
-# ## 10. Analysis of Top Conditions (Random Forest Only)
+# %% 14. Condition Feature Creation [markdown]
 
-# %% [markdown]
-# ### 10.1 Condition Feature Creation
-
-# %%
-print("\n--- 6b. Analyzing Importance of Top Conditions (if RF) ---")
+print("\n--- 14. Analyzing Importance of Top Conditions (if RF) ---")
 condition_feature_map = {} # Map generated condition feature name -> original tuple
 X_train_cond_feats = pd.DataFrame(index=X_train.index) # Empty DF to store new features
 X_test_cond_feats = pd.DataFrame(index=X_test.index)  # Empty DF for test set
@@ -2917,7 +2942,7 @@ secondary_model = None # Initialize secondary model variable
 
 if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
     # 1. Identify Top Frequent Conditions
-    N_TOP_CONDITIONS_TO_ANALYZE = 25 # How many top conditions to potentially turn into features
+   
     if not rule_conditions:
          print("Rule conditions counter is empty. Skipping condition analysis.")
     else:
@@ -2990,6 +3015,8 @@ if SURROGATE_MODEL_TYPE == 'random_forest' and rule_conditions:
             X_test_cond_feats[col] = 0
         X_test_cond_feats = X_test_cond_feats[X_train_cond_feats.columns] # Align order and columns
 
+        X_train_cond_feats.to_csv(OUTPUT_DIR + '/train_cond_feats.csv')
+        X_test_cond_feats.to_csv(OUTPUT_DIR + '/test_cond_feats.csv')
 
 elif SURROGATE_MODEL_TYPE == 'random_forest':
      print("Rule conditions counter not available/empty. Skipping condition feature creation.")
@@ -3002,27 +3029,16 @@ if not X_train_cond_feats.empty:
      print(X_train_cond_feats.head())
 
 
-# %% [markdown]
-# ### 10.2 Secondary Model Training (Original + Condition Features)
+# %% 15 Secondary Model Training [markdown]
 
-# %%
 X_train_plus_cond = pd.DataFrame() # Initialize
 
 if not X_train_cond_feats.empty:
     # 3. Train a Secondary Model
     print("\nTraining secondary model with original + condition features...")
     X_train_plus_cond = pd.concat([X_train, X_train_cond_feats], axis=1)
-
-    # Use a slightly simpler model than the main surrogate? Or same? Using simpler here.
-    secondary_model = RandomForestRegressor(
-        n_estimators=50,       # Fewer estimators
-        random_state=123,      # Different random state?
-        n_jobs=-1,
-        max_depth=8,           # Limit depth
-        min_samples_leaf=10     # Increase min samples leaf
-    )
     try:
-         secondary_model.fit(X_train_plus_cond, y_train)
+         secondary_model = surrogate_model_spec.fit(X_train_plus_cond, y_train)
          print("Secondary model trained successfully.")
     except Exception as e:
          print(f"Error training secondary model: {e}")
@@ -3030,10 +3046,8 @@ if not X_train_cond_feats.empty:
 else:
     print("No condition features created, skipping secondary model training.")
 
-# %% [markdown]
-# ### 10.3 Importance of Condition Features (Permutation, MDI, SHAP, LOFO)
+# %% 16. Importance of Condition Features (Permutation, MDI, SHAP, LOFO) [markdown]
 
-# %%
 # Initialize result dataframes for this section
 condition_importance_df = pd.DataFrame()
 condition_mdi_df = pd.DataFrame()
@@ -3048,7 +3062,7 @@ if secondary_model is not None and not X_train_plus_cond.empty:
     try:
         cond_perm_importance = permutation_importance(
             secondary_model, X_train_plus_cond, y_train,
-            n_repeats=5, random_state=123, n_jobs=-1, # Fewer repeats for speed
+            n_repeats=10, random_state=42, n_jobs=-1, # Fewer repeats for speed
             scoring='neg_root_mean_squared_error' # Higher drop = more important
         )
         cond_importances = pd.Series(cond_perm_importance.importances_mean, index=X_train_plus_cond.columns)
@@ -3060,6 +3074,47 @@ if secondary_model is not None and not X_train_plus_cond.empty:
         })
         # Map back to original condition tuple
         condition_importance_df['Original_Condition'] = condition_importance_df['Condition_Feature'].map(condition_feature_map)
+
+        print("\n--- . Calculating Cond Permutation Importance (Train Set) ---")
+        perm_df = None # Initialize
+        try:
+            print("Calculating permutation importance (this may take a while)...")
+            # Calculate on TRAINING data
+            cond_perm_importance = permutation_importance(
+                secondary_model,
+                X_train_plus_cond, y_train,
+                n_repeats=20,        # Number of times to permute each feature
+                random_state=RANDOM_STATE,
+                n_jobs=-1,           # Use all available cores
+                scoring='root_mean_squared_error' # Use RMSE drop as score (higher is better)
+            )
+            # Importance score is the drop in score, so higher means more important
+            # We negate it if using neg_rmse so positive score drop = positive importance
+            cond_perm_imp_means = cond_perm_importance.importances_mean
+            cond_perm_imp_std = cond_perm_importance.importances_std
+
+            cond_perm_sorted_idx = cond_perm_imp_means.argsort()[::-1] # Sort descending
+
+            cond_perm_df = pd.DataFrame({
+                'feature': X_train_plus_cond.columns[cond_perm_sorted_idx],
+                'importance_mean': cond_perm_imp_means[cond_perm_sorted_idx],
+                'importance_std': cond_perm_imp_std[cond_perm_sorted_idx]
+            })
+
+            # Plotting
+            cond_plot_df_perm = cond_perm_df.head(N_TOP_FEATURES).sort_values('importance_mean', ascending=True) # Ascending for horizontal bar
+            cond_fig_perm = px.bar(cond_plot_df_perm,
+                            x='importance_mean', y='feature', orientation='h',
+                            error_x='importance_std',
+                            title=f'Top {N_TOP_FEATURES} Permutation Feature Importance (Train Set, Higher is Better)',
+                            labels={'importance_mean': 'Mean Importance (Score Drop)', 'feature': 'Feature'})
+            save_plot(cond_fig_perm, "cond_featimp_permutation_train", output_dir=OUTPUT_DIR)
+            print("ConditionPermutation Importance (Train Set - Top 10):")
+            print(cond_perm_df.head(N_TOP_FEATURES))
+
+        except Exception as e:
+            print(f"Error calculating Permutation Importance: {e}")
+            perm_df = pd.DataFrame() # Ensure it's an empty DF on error
 
         if not condition_importance_df.empty:
             plot_df_cond_perm = condition_importance_df.head(N_TOP_FEATURES).sort_values('Importance', ascending=True)
@@ -3143,14 +3198,20 @@ if secondary_model is not None and not X_train_plus_cond.empty:
     # --- LOFO Importance for Conditions ---
     print("\nCalculating LOFO importance for condition features...")
     try:
-        # Use KFold for cross-validation as condition features might not be time-dependent in isolation
-        # relative to original features, but evaluate importance *within* the secondary model
-        n_splits_cond_lofo = min(3, len(X_train_plus_cond) // 2) if len(X_train_plus_cond) >= 4 else 2
-        if n_splits_cond_lofo < 2:
-             print("Warning: Not enough samples for KFold CV in Condition LOFO. Skipping.")
-             raise ValueError("Insufficient samples for LOFO KFold CV.")
+        n_splits_cond_lofo = min(5, len(X_train_plus_cond) // 2) if len(X_train_plus_cond) >= 4 else 2 # Basic check
+        if n_splits_lofo < 2:
+            print("Warning: Train data too small for reliable TimeSeriesSplit in LOFO. Skipping.")
+            raise ValueError("Insufficient data for LOFO CV.")
 
-        cv_lofo_cond = KFold(n_splits=n_splits_cond_lofo, shuffle=True, random_state=RANDOM_STATE + 1)
+        # cv_lofo_cond = TimeSeriesSplit(n_splits=n_splits_cond_lofo)
+        # Use KFold for cross-validation as condition features are not time-series dependent in isolation
+        cv_lofo_cond = KFold(n_splits=n_splits_cond_lofo, shuffle=True, random_state=42) 
+
+        # Combine X_train and y_train for LOFO Dataset input
+        lofo_input_df = pd.concat([X_train, y_train], axis=1)
+        lofo_dataset = Dataset(df=lofo_input_df, target=TARGET_VARIABLE, features=features)
+
+
         # Create Dataset with original + condition features
         lofo_dataset_cond = Dataset(df=pd.concat([X_train_plus_cond, y_train], axis=1),
                                     target=TARGET_VARIABLE,
@@ -3161,7 +3222,7 @@ if secondary_model is not None and not X_train_plus_cond.empty:
         lofo_imp_cond = LOFOImportance(lofo_dataset_cond,
                                     model=lofo_model_cond,
                                     cv=cv_lofo_cond,
-                                    scoring='r2') # Use R2 score
+                                    scoring='neg_root_mean_squared_error') # Use R2 score
 
         importance_df_cond_lofo_raw = lofo_imp_cond.get_importance()
 
@@ -3215,11 +3276,9 @@ report_generator.results_dict['condition_importance_lofo'] = condition_lofo_df
 # Add summary to report (uses permutation importance df)
 report_generator.add_condition_importance_summary(condition_importance_df)
 
-# %% [markdown]
-# ### 10.4 Linear Models using ONLY Condition Features
+# %% 17 Linear Models using ONLY Condition Features [markdown]
 
-# %%
-print("\n--- 6b.1 Linear Models using ONLY Condition Features ---")
+print("\n--- 17. Linear Models using ONLY Condition Features ---")
 condition_linear_results = None # Initialize local variable
 
 if not X_train_cond_feats.empty:
@@ -3235,13 +3294,14 @@ if not X_train_cond_feats.empty:
         y_pred_test_lr_cond = lr_cond.predict(X_test_cond_only)
         rmse_lr_cond = np.sqrt(mean_squared_error(y_test, y_pred_test_lr_cond))
         r2_lr_cond = r2_score(y_test, y_pred_test_lr_cond)
-        print(f"  Linear Regression: Test RMSE={rmse_lr_cond:.4f}, R2={r2_lr_cond:.4f}")
+        mae_lr_cond = mean_absolute_error(y_test, y_pred_test_lr_cond)
+        print(f"  Linear Regression: Test RMSE={rmse_lr_cond:.4f}, R2={r2_lr_cond:.4f}, MAE={mae_lr_cond:.4f}")
 
         # 2. Ridge Regression (with Cross-Validation for alpha)
         print("Training RidgeCV Regression (Conditions Only)...")
         ridge_alphas = np.logspace(-4, 2, 100) # Alpha range
-        # Use KFold for CV as condition features might not be time-ordered in the same way
-        cv_ridge_lasso = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE + 2)
+        # Use TimeSeriesSplit for CV as condition features might not be time-ordered in the same way
+        cv_ridge_lasso = TimeSeriesSplit(n_splits=5, max_train_size=12, test_size=6, gap=0)
         ridge_cond = RidgeCV(alphas=ridge_alphas, cv=cv_ridge_lasso) # Removed store_cv_values=True (can use lots of memory)
         ridge_cond.fit(X_train_cond_only, y_train)
         y_pred_test_ridge_cond = ridge_cond.predict(X_test_cond_only)
@@ -3302,15 +3362,13 @@ else:
     print("No condition features were generated. Skipping linear models based on conditions.")
     report_generator.results_dict['condition_linear_results'] = None
 
-# %% [markdown]
-# ## 11. Feature Interaction Analysis
+# %% 18. Feature Interaction Analysis [markdown]
 
-# %% [markdown]
-# ### 11.1 Pairwise H-Statistic & Stability
-
-# %%
-print("\n--- 7a. Calculating Pairwise Friedman H-statistics (Approximation) ---")
+# %% 18.1.1 Pairwise H-Statistic & Stability [markdown]
+print("\n--- 18.1.1. Calculating Pairwise Friedman H-statistics (Approximation) ---")
 print("Note: H-statistic values are approximations based on PDP variances.")
+
+surrogate_model = surrogate_model_spec.fit(X_train, y_train)
 h_values = None # Initialize H-statistic Series
 interaction_stability = {} # Initialize stability dict
 
@@ -3383,7 +3441,7 @@ else:
 
         for i in range(N_BOOTSTRAP_SAMPLES):
             print(f"  Bootstrap sample {i+1}/{N_BOOTSTRAP_SAMPLES}")
-            X_boot, y_boot = resample(X_train, y_train, random_state=RANDOM_STATE + i) # Resample with replacement
+            X_boot, y_boot = resample(X_train, y_train, random_state=RANDOM_STATE + i, replace=False) # Resample with replacement
 
             # Option 1: Use original model on bootstrap sample (faster approximation)
             # boot_model_stable = surrogate_model
@@ -3424,11 +3482,9 @@ else:
 report_generator.results_dict['h_values'] = h_values
 report_generator.results_dict['interaction_stability'] = interaction_stability
 
-# %% [markdown]
-# ### 11.2 Three-Way H-Statistic (Top Feature Triplets)
+# %% 18.1.2 Three-Way H-Statistic (Top Feature Triplets) [markdown]
 
-# %%
-print("\n--- 7b. Calculating Three-way H-statistic (Approximation, for Top Feature Triplets) ---")
+print("\n--- 18.1.2. Calculating Three-way H-statistic (Approximation, for Top Feature Triplets) ---")
 h_3way_df = None # Initialize DataFrame for results
 
 # Need combined importance to select top features
@@ -3500,14 +3556,11 @@ report_generator.results_dict['threeway_interactions_h'] = h_3way_df
 # Add feature interaction summary to report (uses h_values, stability, h_3way_df)
 report_generator.add_feature_interactions_summary(h_values, interaction_stability, h_3way_df)
 
-# %% [markdown]
-# ### 11.3 PDP / ICE Plots
-
-# %%
-print("\n--- 7d. Generating Partial Dependence Plots (PDP/ICE) ---")
+# %% 18.1.3. PDP / ICE Plots [markdown]
+print("\n--- 18.1.3. Generating Partial Dependence Plots (PDP/ICE) ---")
 # Use top features from combined importance if available, otherwise SHAP, otherwise first N features
 if combined_imp is not None and not combined_imp.empty:
-     top_features_pdp = combined_imp.head(5).index.tolist()
+     top_features_pdp = combined_imp.head(N_TOP_FEATURES).index.tolist()
 elif shap_df is not None and not shap_df.empty:
      top_features_pdp = shap_df['feature'].head(5).tolist()
 else:
@@ -3543,17 +3596,15 @@ for feature in top_features_pdp:
         plt.close(fig_pdp_ice)
 
 
-# %% [markdown]
-# ### 11.4 Custom Interaction PDP Plots
+# %% 18.1.4. Custom Interaction PDP Plots [markdown]
 
-# %%
-print("\n--- 7e. Generating Custom Interaction PDP plots (Matplotlib) ---")
+print("\n--- 18.1.4. Generating Custom Interaction PDP plots (Matplotlib) ---")
 interaction_strengths_custom = {} # Store H-stats calculated by custom function
 
 # Determine the list of pairs to plot based on H-statistic or SHAP interactions
 pairs_to_plot = []
 if h_values is not None and not h_values.empty:
-    pairs_to_plot = h_values.head(min(5, len(h_values))).index.tolist() # Top 5 H-stat pairs
+    pairs_to_plot = h_values.head(min(N_TOP_FEATURES, len(h_values))).index.tolist() # Top 5 H-stat pairs
     print(f"Generating custom interaction plots for top {len(pairs_to_plot)} feature pairs (based on H-statistic)...")
 elif shap_interaction_df is not None and not shap_interaction_df.empty:
     print("H-statistic values not available/empty. Falling back to top SHAP interactions...")
@@ -3614,14 +3665,9 @@ for pair in pairs_to_plot:
 print(f"\nFinished generating {plotted_count} custom interaction PDP plots.")
 report_generator.results_dict['custom_pdp_h_stats'] = interaction_strengths_custom
 
-# %% [markdown]
-# ## 12. Causality Analysis (Granger)
 
-# %% [markdown]
-# ### 12.1 Stationarity Tests (ADF)
-
-# %%
-print("\n--- 8a. Performing Stationarity Tests (ADF) on Training Data ---")
+# %% 19. Stationarity Tests (ADF) [markdown]
+print("\n--- 20. Performing Stationarity Tests (ADF) on Training Data ---")
 stationarity_results = {} # Re-initialize just in case
 if not features:
      print("No features available for stationarity testing.")
@@ -3658,10 +3704,7 @@ report_generator.add_stationarity_summary(stationarity_results)
 # Store in main dict
 report_generator.results_dict['stationarity_test_adf'] = stationarity_results
 
-# %% [markdown]
-# ### 12.2 Granger Causality (Feature -> Target)
-
-# %%
+# %% 20. Granger Causality (Feature -> Target) [markdown]
 print("\n--- 8b. Running Granger Causality Tests (Feature -> Target) ---")
 GRANGER_MAX_LAG = 3 # Define max lag for tests
 granger_p_values = None # Initialize
@@ -3713,10 +3756,7 @@ report_generator.add_granger_causality_summary(granger_p_values, GRANGER_MAX_LAG
 # Store in main dict
 report_generator.results_dict['granger_causality_feature_to_target_p_values'] = granger_p_values
 
-# %% [markdown]
-# ### 12.3 Condition Granger Causality (Condition Feature -> Target)
-
-# %%
+# %% 21. Granger Causality (Condition Feature -> Target) [markdown]
 print("\n--- 8c. Running Granger Causality Tests (Condition Feature -> Target) ---")
 GRANGER_MAX_LAG = 3 # Use the same lag as for original features
 condition_granger_p_values = None # Initialize
@@ -3768,17 +3808,11 @@ report_generator.results_dict['condition_feature_map'] = condition_feature_map #
 report_generator.add_condition_granger_causality_summary(condition_granger_p_values, GRANGER_MAX_LAG)
 
 
-# %% [markdown]
-# ## 13. Temporal Feature Importance Analysis
+# %% 22. Temporal Feature Importance Analysis [markdown]
 
-# %%
-print("\n--- 9. Temporal Feature Importance Analysis ---")
+print("\n--- 22. Temporal Feature Importance Analysis ---")
 temporal_importance_data = []
 temporal_plot_features = []
-
-# Define parameters for the analysis
-WINDOW_SIZE = 12  # Number of periods per window
-STEP_SIZE = 1     # How many periods to slide the window
 
 # Ensure train data is suitable
 if isinstance(X_train, pd.DataFrame) and isinstance(X_train.index, pd.DatetimeIndex) and len(X_train) > WINDOW_SIZE:
@@ -3787,7 +3821,8 @@ if isinstance(X_train, pd.DataFrame) and isinstance(X_train.index, pd.DatetimeIn
             X=X_train, # Use training data
             y=y_train,
             feature_names=features,
-            window_size=WINDOW_SIZE
+            window_size=WINDOW_SIZE,
+            surrogate_model=surrogate_model
         )
 
         if temporal_importance_data:
@@ -3847,11 +3882,8 @@ else:
 report_generator.add_temporal_importance_summary(temporal_importance_data, temporal_plot_features)
 
 
-# %% [markdown]
-# ## 13. Interpretability Summary Plots (SHAP Force Plot)
-
-# %%
-print("\n--- 9. Interpretability Summary Plots ---")
+# %% 23. Interpretability Summary Plots (SHAP Force Plot) [markdown]
+print("\n--- 23. Interpretability Summary Plots ---")
 
 if explainer is not None and shap_values is not None and not X_test.empty:
     print("Generating SHAP Force Plots for sample predictions (Test Set)...")
@@ -3883,14 +3915,8 @@ if explainer is not None and shap_values is not None and not X_test.empty:
 else:
     print("SHAP explainer, SHAP values, or Test set not available. Skipping force plots.")
 
-# %% [markdown]
-# ## 14. Feature Engineering & Linear Model Comparison
-
-# %% [markdown]
-# ### 14.1 Engineered Feature Creation
-
-# %%
-print("\n--- 12. Feature Engineering & Linear Model Comparison ---")
+# %% 24. Feature Engineering & Linear Model Comparison [markdown]
+print("\n--- 24. Feature Engineering & Linear Model Comparison ---")
 engineered_features_train_df = pd.DataFrame(index=X_train.index)
 engineered_features_test_df = pd.DataFrame(index=X_test.index)
 engineered_feature_names = [] # List to store names of successfully created features
@@ -3961,7 +3987,7 @@ elif SURROGATE_MODEL_TYPE == 'random_forest':
 
 # --- Create Interaction features based on H-VALUES or SHAP ---
 print("\nCreating engineered interaction features...")
-N_INTERACTION_FEATURES = 3 # Max interaction features to create
+N_INTERACTION_FEATURES = N_TOP_FEATURES # Max interaction features to create
 top_pairs = []
 interaction_source = "None"
 
@@ -4021,38 +4047,9 @@ if not engineered_features_train_df.empty:
 print(f"\nTotal engineered features created: {len(engineered_feature_names)}")
 report_generator.results_dict['actual_eng_features'] = engineered_feature_names # Store names
 
-# %% [markdown]
-# ### 14.2 Plot Engineered Feature Distributions
+# %% 24.1 Linear Model Comparison [markdown]
 
-# %%
-print("\nGenerating plots for engineered features...")
-if not engineered_features_train_df.empty:
-    print(f"Plotting distributions for {len(engineered_features_train_df.columns)} engineered features...")
-    for eng_feat in engineered_features_train_df.columns:
-        try:
-            plt.figure(figsize=(10, 4))
-            # Use distplot for continuous, countplot for binary/few categories
-            if engineered_features_train_df[eng_feat].nunique() <= 10: # Heuristic for categorical/binary
-                 sns.countplot(x=engineered_features_train_df[eng_feat])
-                 plt.title(f'Count Plot: {eng_feat} (Train Set)')
-            else:
-                 sns.histplot(engineered_features_train_df[eng_feat], kde=True)
-                 plt.title(f'Distribution Plot: {eng_feat} (Train Set)')
-            plt.xlabel(eng_feat)
-            plt.ylabel('Frequency / Count')
-            plt.tight_layout()
-            dist_fig = plt.gcf()
-            save_plot(dist_fig, f"engineered_dist_{eng_feat}", output_dir=OUTPUT_DIR)
-        except Exception as e:
-            print(f"Could not plot distribution for engineered feature {eng_feat}: {e}")
-            plt.close() # Close plot if error occurred
-else:
-    print("No engineered features were created to plot.")
-
-# %% [markdown]
-# ### 14.3 Linear Model Comparison
-
-# %%
+print("\n--- 24.1 Linear Model Comparison ---")
 # --- Compare Linear Models ---
 rmse_orig, r2_orig, rmse_eng, r2_eng = None, None, None, None # Initialize metrics
 
@@ -4124,13 +4121,8 @@ report_generator.results_dict['r2_orig'] = r2_orig
 report_generator.results_dict['rmse_eng'] = rmse_eng
 report_generator.results_dict['r2_eng'] = r2_eng
 
-# %% [markdown]
-# ## 15. Final Report Generation
+# %% 25. Final Report Generation [markdown]
 
-# %% [markdown]
-# ### 15.1 Add Dynamic Summary & Limitations
-
-# %%
 print("\n--- Generating Dynamic Summary and Adding Limitations ---")
 # Add dynamic summary (Section 0) based on collected results
 report_generator.add_dynamic_summary() # This reads from results_dict now
@@ -4138,35 +4130,16 @@ report_generator.add_dynamic_summary() # This reads from results_dict now
 # Add limitations section
 report_generator.add_limitations_section()
 
-# %% [markdown]
-# ### 15.2 Write Detailed Summary File
-
-# %%
-print("\n--- 10. Summarizing Key Findings (Detailed Text File) ---")
+print("\n--- 25. Summarizing Key Findings (Detailed Text File) ---")
 summary_filename = "summary_findings_detailed.txt" # Name for the text summary
 # Call write_summary_file - it will access results from report_generator.results_dict
 report_generator.write_summary_file(summary_filename=summary_filename)
 
-# %% [markdown]
-# ### 15.3 Save JSON Results
-
-# %%
 print("\n--- Saving Analysis Results to JSON ---")
 report_generator.save_analysis_results(output_path="analysis_results.json")
 
-# %% [markdown]
-# ### 15.4 Generate Markdown Report
-
-# %%
 print("\n--- Generating Final Markdown Report ---")
 report_generator.generate_markdown_report(filename="SAFE_Analysis_Report.md")
 
-# %% [markdown]
-# ## 16. Workflow Complete
-
-# %%
 print("\n--- Workflow Complete ---")
 print(f"All outputs saved in directory: {OUTPUT_DIR}")
-
-
-# %%

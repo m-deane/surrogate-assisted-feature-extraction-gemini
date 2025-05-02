@@ -1,6 +1,7 @@
 # Project specific
 safe_analysis*/
-_data/
+_data/*.csv
+preem/
 
 # Python
 __pycache__/
